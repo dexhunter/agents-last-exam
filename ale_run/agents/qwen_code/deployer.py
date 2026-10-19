@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
@@ -226,6 +227,7 @@ class QwenCodeDeployer(BaseAgentDeployer):
                 cwd=str(self._cwd),
                 env=env,
                 start_new_session=os.name != "nt",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 limit=64 * 1024 * 1024,
             )
         (wd / "qwen_code.pid").write_text(str(proc.pid), encoding="ascii")

@@ -60,6 +60,7 @@ async def command(argv: list[str], *, env=None, timeout: float = 300):
         stderr=asyncio.subprocess.PIPE,
         env=env,
         start_new_session=os.name != "nt",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     job = None
     try:

@@ -530,6 +530,27 @@ async def test_cancellation_during_cleanup_is_preserved(tmp_path, monkeypatch):
         await asyncio.wait_for(task, 5)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows console ownership")
+async def test_windows_cli_does_not_share_desktop_console(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    check = "import ctypes; assert ctypes.windll.kernel32.GetConsoleWindow() == 0;"
+    result = await runtime.command([sys.executable, "-c", check])
+    assert result.returncode == 0, result.stderr
+    d = adapter(tmp_path)
+    events = [
+        {
+            "type": "system",
+            "subtype": "init",
+            "mcp_servers": [{"name": "cua", "status": "connected"}],
+        },
+        {"type": "result", "subtype": "success", "is_error": False},
+    ]
+    source = check + "print(" + repr("\n".join(map(json.dumps, events))) + ")"
+    monkeypatch.setattr(d, "_build_argv", lambda: [sys.executable, "-c", source])
+    result = await d.launch("check console isolation")
+    assert result.status == "completed", result.error
+
+
 def test_native_chat_mirror_preserves_partial_records(tmp_path):
     from ale_run.agents.qwen_code.telemetry import NativeChatMirror
 

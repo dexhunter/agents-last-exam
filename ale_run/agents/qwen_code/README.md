@@ -89,6 +89,8 @@ Completion requires a successful native terminal result and connected GUI MCP.
 A zero exit code alone is insufficient. The harness allows ten seconds for exit
 after the final result, then reaps lingering processes. It owns a process group
 and subreaper on Linux and a nested Job Object on Windows, including during cancellation.
+Windows CLI processes run without a console so closing a desktop console window
+cannot send a close event to the agent itself.
 
 ## Trajectories and telemetry
 
