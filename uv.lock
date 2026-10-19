@@ -26,6 +26,7 @@ members = [
     "ale-grok-cli",
     "ale-hermes",
     "ale-kimi-code",
+    "ale-muse-code",
     "ale-octavus-cli",
     "ale-openclaw-cli",
     "ale-openhands-cli",
@@ -283,6 +284,11 @@ requires-dist = [{ name = "pyyaml" }]
 name = "ale-kimi-code"
 version = "0.1.0"
 source = { editable = "ale_run/agents/kimi_code" }
+
+[[package]]
+name = "ale-muse-code"
+version = "0.1.0"
+source = { editable = "ale_run/agents/muse_code" }
 
 [[package]]
 name = "ale-octavus-cli"

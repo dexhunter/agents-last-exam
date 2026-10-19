@@ -1,0 +1,37 @@
+# Official Muse Code, running natively in a Linux or Windows sandbox.
+# Auth: META_API_KEY from secret/.env or the host environment.
+harness: muse_code
+model: muse-wonder-1.0
+
+config:
+  # Exact native release, verified against the official manifest and SHA-256.
+  cli_version: "1.4.10-R6427.1"
+  api_key: null                      # optional ${env:YOUR_META_KEY} override
+  base_url: null                     # null uses Meta's official endpoint
+  reasoning_effort: high             # minimal|low|medium|high|xhigh|max|ultra (Meta)
+
+  # Match Codex/Claude's unattended execution inside ALE's isolated sandbox.
+  # yolo disables Muse's inner sandbox/approval and trusts this workspace.
+  yolo: true
+  approval_mode: never               # used when yolo=false
+  sandbox_network: enabled           # restricted|proxy-only|enabled; yolo=false
+  trust_workspace: true              # used when yolo=false
+
+  # The experiment owns the wall-clock budget. null/-1 means no model-step cap.
+  max_turns: null
+  context_window: null               # native context_compaction provider limit
+  auto_compact_token_limit: null     # requires context_window; sets soft fraction
+  context_compaction_strategy: null  # null keeps the native strategy
+  context_compaction_soft_threshold: null
+  context_compaction_hard_threshold: null
+  max_tool_output_bytes: null        # native default; explicit 0 or >=9
+  parallel_tool_calls: null          # native default
+  execution_capacity: null           # native default; explicit 1..64
+
+  disable_web_tools: false
+  disable_reminders: false
+  no_foreign_personal_context: true
+  coordinate_space: pixel            # same CUA bridge and default as Codex/Claude
+  telemetry_enabled: true            # native events, API usage, timings, tool results
+  toolset: null                      # optional native tool allowlist; CUA stays enabled
+  settings_overrides: {}             # native dotted -c keys; never put credentials here
