@@ -1,17 +1,17 @@
-"""Run the pinned Qwen Code CLI with OpenAI-compatible auth and the CUA MCP bridge."""
+"""Run official Qwen Code with required GUI tools on Linux and Windows."""
 
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import os
-import shutil
-import subprocess
 import time
-import tempfile
-from pathlib import Path
-from typing import Any, ClassVar
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import ClassVar
 
+from ale_run.agents._cli_runtime import redact, secret_values
 from ale_run.base_interface import (
     AgentRunResult,
     BaseAgentDeployer,
@@ -24,218 +24,311 @@ from ale_run.base_interface import (
     TrajectoryBuilder,
 )
 
-from ale_run.agents._cli_runtime import (
-    redact,
-    ensure_cli_node,
-    run_command,
-    secret_values,
-    wait_process,
-)
-
 from .config import QwenCodeConfig
+from .runtime import assign_job, install_cli, stop_process
+from .telemetry import NativeChatMirror, TelemetryMirror, summarize_telemetry
+from .trajectory import enrich_native
 
-logger = logging.getLogger(__name__)
-
-_TERM_GRACE_S = 3.0
+_TERM_GRACE_S = 1.0
+_FINAL_EXIT_GRACE_S = 10.0
+_GUI_INSTRUCTIONS = (
+    "Desktop and browser UI access is already configured through the cua MCP server. "
+    "Discover its mcp__cua__ tools with tool_search, then invoke them with tool_call. "
+    "Use screenshots to observe the desktop and the provided click, typing, and key tools "
+    "to interact with it. No additional computer-use SDK or MCP server installation is needed. "
+    "Qwen may resize screenshots. Follow the coordinate space in the pointer tool schema. "
+    "For pixel coordinates, call get_screen_size and scale positions from the displayed image "
+    "to the full desktop dimensions: x * screen_width / image_width, "
+    "y * screen_height / image_height. For normalized coordinates, map each image axis to 0-1000. "
+    "After launching an app, inspect the desktop; a launcher process exiting does not mean "
+    "the app window closed. Complete the task autonomously using the available tools."
+)
 
 
 class QwenCodeDeployer(BaseAgentDeployer):
-    """Stdlib-only deployer for the ``@qwen-code/qwen-code`` npm package."""
-
     default_executor: ClassVar[str] = "sandbox"
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
-    hot_artifacts: ClassVar[tuple[str, ...]] = ("stdout.log", "stderr.log")
+    hot_artifacts: ClassVar[tuple[str, ...]] = (
+        "stdout.log",
+        "stderr.log",
+        "telemetry.jsonl",
+        "event_times.jsonl",
+        "native_chats.jsonl",
+    )
 
     @property
-    def version(self) -> str | None:
-        cfg: QwenCodeConfig = self.config  # type: ignore[assignment]
-        return cfg.cli_version
+    def version(self) -> str:
+        return self.config.cli_version
 
     async def install(self) -> None:
-        cfg: QwenCodeConfig = self.config  # type: ignore[assignment]
-        sandbox = self.executor.sandbox
-
-        if not sandbox.is_linux:
-            raise NotImplementedError("qwen_code is Linux-only")
-
-        if not cfg.api_key:
-            raise RuntimeError(
-                "qwen_code: config.api_key is required (e.g. "
-                "api_key: ${env:HF_INFERENCE_TOKEN} in the agent yaml) -- there is no "
-                "provider-name env-var fallback to read a key from."
-            )
-
-        from ale_run.agents._bootstrap import ensure_node_npm
+        from ale_run.agents._bootstrap import ensure_cua_mcp_server, ensure_node_npm
 
         node, npm = await ensure_node_npm()
-        node = await ensure_cli_node(node, npm, (22, 0, 0))
-        self._node_path = node
+        self._node_path, self._qwen_path = await install_cli(node, npm, self.config.cli_version)
+        self.actual_cli_version = self.config.cli_version
+        self.cli_source = "official"
+        await ensure_cua_mcp_server(self.executor.sandbox)
+        bridge = Path(self.executor.sandbox.mcp_server_dir) / "src" / "index.js"
+        if not bridge.is_file():
+            raise RuntimeError(f"qwen_code: required CUA bridge is missing: {bridge}")
 
-        qwen_path = shutil.which("qwen")
-        installed = None
-        if qwen_path:
-            probe = await run_command([qwen_path, "--version"], timeout=30)
-            installed = probe.stdout.strip() if probe.returncode == 0 else None
-        if not qwen_path or installed != cfg.cli_version:
-            logger.info("qwen_code: 'qwen' not on PATH, installing v%s ...", cfg.cli_version)
-            await self._install_cli(npm, cfg.cli_version)
-            qwen_path = shutil.which("qwen")
-            if not qwen_path:
-                raise RuntimeError("QwenCodeDeployer: 'qwen' still not found after install")
-        self._qwen_path = qwen_path
+    def _prepare_run(self) -> None:
+        from ale_run.agents._bootstrap import cua_bridge_env
 
-        try:
-            probe = await run_command(
-                [qwen_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except TimeoutError as e:
-            raise RuntimeError(f"qwen --version timed out: {e}")
-        if probe.returncode != 0 or probe.stdout.strip() != cfg.cli_version:
-            raise RuntimeError("qwen_code: installed CLI does not match cli_version")
-        logger.info("qwen_code: CLI ok -- %s", (probe.stdout or "").strip())
-
+        cfg = self.config
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)
-        self._home_dir = tempfile.mkdtemp(prefix=".ale-qwen-", dir=wd.parent)
-
-        from ale_run.agents._bootstrap import ensure_cua_mcp_server
-
-        await ensure_cua_mcp_server(sandbox)
-        mcp_config = self._build_mcp_config(sandbox, self.executor.cua_bridge_url())
-        mcp_index = mcp_config["mcpServers"]["cua"]["args"][0]
-        self._mcp_config_json = json.dumps(mcp_config) if os.path.exists(mcp_index) else None
-        if self._mcp_config_json is None:
-            logger.warning(
-                "qwen_code: CUA MCP server not found at %s -- skipping "
-                "--mcp-config; qwen will use built-in tools only",
-                mcp_index,
-            )
-
-        logger.info("qwen_code: install complete (model=%s base_url=%s)", cfg.model, cfg.base_url)
-
-    async def _install_cli(self, npm: str, version: str) -> None:
-        pkg = f"@qwen-code/qwen-code@{version}"
-        proc = await run_command(
-            [npm, "install", "-g", pkg],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"qwen_code: npm install -g {pkg} failed (rc={proc.returncode}): "
-                f"stdout: {(proc.stdout or '')[-800:]} "
-                f"stderr: {(proc.stderr or '')[-800:]}"
-            )
-        logger.info("qwen_code: installed via npm -- %s", (proc.stdout or "").strip()[-200:])
-
-    @staticmethod
-    def _build_mcp_config(sandbox: Any, cua_url: str) -> dict:
-        """Build the ``--mcp-config`` payload for the CUA MCP bridge."""
-        node_exe = sandbox.node
-        mcp_server_dir = sandbox.mcp_server_dir
-        is_linux = sandbox.is_linux
-
-        sep = "/" if is_linux else "\\"
-        mcp_index = f"{mcp_server_dir.rstrip('/\\ ')}{sep}src{sep}index.js"
-
-        return {
-            "mcpServers": {
-                "cua": {
-                    "command": node_exe,
-                    "args": [mcp_index],
-                    "env": {"CUA_SERVER_URL": cua_url},
-                },
+        self._session_id = str(uuid.uuid4())
+        # Qwen percent-encodes cwd in native chat paths. Keep Windows paths short.
+        self._state_dir = Path.home() / ".ale-qwen-code" / "runs" / self._session_id[:12]
+        self._state_dir.mkdir(parents=True)
+        self._cwd = wd if self.executor.sandbox.is_linux else self._state_dir / "cwd"
+        self._cwd.mkdir(parents=True, exist_ok=True)
+        (self._state_dir / "empty.json").write_text("{}", encoding="utf-8")
+        settings = {
+            "security": {"auth": {"selectedType": cfg.auth_type}},
+            "general": {"chatRecording": True},
+            "tools": {"sandbox": False},
+            "skills": {"disabled": ["computer-use", "browser-use"]},
+            "privacy": {"usageStatisticsEnabled": False},
+            "model": {"generationConfig": {}},
+            "telemetry": {
+                "enabled": cfg.telemetry_enabled,
+                "target": "local",
+                "outfile": str(self._state_dir / "telemetry.raw"),
+                "logPrompts": False,
+                "includeSensitiveSpanAttributes": False,
             },
         }
-
-    async def launch(self, prompt: str) -> AgentRunResult:
-        cfg: QwenCodeConfig = self.config  # type: ignore[assignment]
-        wd = Path(self.executor.work_dir)
-        wd.mkdir(parents=True, exist_ok=True)
-
-        stdout_log = wd / "stdout.log"
-        stderr_log = wd / "stderr.log"
-        pid_file = wd / "qwen_code.pid"
-        for f in (stdout_log, stderr_log, pid_file):
-            if f.exists():
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
-
-        argv = self._build_argv(prompt)
-        env = self._build_env(cfg)
-
-        t0 = time.monotonic()
-        with open(stdout_log, "wb") as fout, open(stderr_log, "wb") as ferr:
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=fout,
-                stderr=ferr,
-                env=env,
-                cwd=str(wd),
-                start_new_session=True if hasattr(os, "setsid") else False,
-            )
-        pid_file.write_text(str(proc.pid), encoding="ascii")
-        logger.info(
-            "qwen_code: spawned pid=%s (model=%s base_url=%s)", proc.pid, cfg.model, cfg.base_url
-        )
-
-        await wait_process(proc, grace_s=_TERM_GRACE_S)
-
-        duration_s = time.monotonic() - t0
-        exit_code = proc.returncode
-        status = "completed" if exit_code == 0 else "failed"
-        error: str | None = None
-        if status == "failed":
-            error = _diagnose_failure(stderr_log, stdout_log, exit_code)
-
-        return AgentRunResult(
-            status=status,
-            pid=proc.pid,
-            exit_code=exit_code,
-            transcript_path=str(stdout_log),
-            stderr_path=str(stderr_log),
-            duration_s=duration_s,
-            error=redact(error, secret_values(cfg, self.executor.env)),
-        )
-
-    _BROKEN_SCHEMA_TOOLS = ("get_goal", "list_agents")
-
-    def _build_argv(self, prompt: str) -> list[str]:
-        argv = [
-            self._qwen_path,
-            "-y",
-            "--exclude-tools",
-            ",".join(self._BROKEN_SCHEMA_TOOLS),
-            "--output-format",
-            "stream-json",
-        ]
-        if getattr(self, "_mcp_config_json", None):
-            argv += ["--mcp-config", self._mcp_config_json]
-        argv += [f"--prompt={prompt}"]
-        return argv
+        generation = settings["model"]["generationConfig"]
+        if cfg.context_window is not None:
+            generation["contextWindowSize"] = cfg.context_window
+        if cfg.max_output_tokens is not None:
+            generation["samplingParams"] = {"max_tokens": cfg.max_output_tokens}
+        if cfg.reasoning_effort is not None:
+            settings["model"]["reasoningEffort"] = cfg.reasoning_effort
+        if cfg.auto_compact_token_limit is not None:
+            settings["context"] = {
+                "autoCompactThreshold": cfg.auto_compact_token_limit / cfg.context_window,
+            }
+        path_type = PurePosixPath if self.executor.sandbox.is_linux else PureWindowsPath
+        bridge = str(path_type(self.executor.sandbox.mcp_server_dir) / "src" / "index.js")
+        settings["mcpServers"] = {
+            "cua": {
+                "command": self.executor.sandbox.node,
+                "args": [bridge],
+                "env": {
+                    **cua_bridge_env(self.executor),
+                    "CUA_COORDINATE_SPACE": cfg.coordinate_space,
+                },
+                "trust": True,
+            }
+        }
+        content = json.dumps(settings, indent=2)
+        (self._state_dir / "settings.json").write_text(content, encoding="utf-8")
+        (wd / "qwen-settings.json").write_text(content, encoding="utf-8")
 
     def _build_env(self, cfg: QwenCodeConfig) -> dict[str, str]:
-        env = os.environ.copy()
-        for k, v in (self.executor.env or {}).items():
-            env[k] = v
-        env["OPENAI_API_KEY"] = cfg.api_key or ""
-        env["OPENAI_BASE_URL"] = cfg.base_url
-        env["OPENAI_MODEL"] = cfg.model
-        env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
-        env["NO_COLOR"] = "1"
-        env["HOME"] = getattr(self, "_home_dir", os.path.expanduser("~"))
-        for k, v in cfg.extra_envs.items():
-            env[k] = v
-        if getattr(self, "_node_path", None):
+        env = {**os.environ, **(self.executor.env or {}), **cfg.extra_envs}
+        key = cfg.api_key or env.get(cfg.api_key_env)
+        if not key:
+            raise RuntimeError(f"qwen_code: set config.api_key or {cfg.api_key_env}")
+        for name in list(env):
+            if name.startswith(("QWEN_TELEMETRY_", "OTEL_")):
+                env.pop(name)
+        env.update(
+            {
+                "OPENAI_API_KEY": key,
+                "OPENAI_BASE_URL": cfg.base_url,
+                "OPENAI_MODEL": cfg.model,
+                "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1",
+                "QWEN_CODE_SKIP_UPDATE_CHECK_ONCE": "true",
+                "NO_COLOR": "1",
+            }
+        )
+        if hasattr(self, "_state_dir"):
+            env.update(
+                {
+                    "QWEN_HOME": str(self._state_dir),
+                    "QWEN_RUNTIME_DIR": str(self._state_dir),
+                    "QWEN_CODE_SYSTEM_SETTINGS_PATH": str(self._state_dir / "empty.json"),
+                    "QWEN_CODE_SYSTEM_DEFAULTS_PATH": str(self._state_dir / "empty.json"),
+                }
+            )
+        if hasattr(self, "_node_path"):
             env["PATH"] = str(Path(self._node_path).parent) + os.pathsep + env.get("PATH", "")
         return env
+
+    def _build_argv(self, prompt: str = "") -> list[str]:
+        cfg = self.config
+        argv = [
+            self._node_path,
+            self._qwen_path,
+            "--approval-mode",
+            "yolo",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--auth-type",
+            cfg.auth_type,
+            "--model",
+            cfg.model,
+            "--session-id",
+            self._session_id,
+            "--allowed-mcp-server-names",
+            "cua",
+            "--append-system-prompt",
+            _GUI_INSTRUCTIONS,
+        ]
+        disabled = tuple(
+            dict.fromkeys(
+                (
+                    "ask_user_question",
+                    "enter_plan_mode",
+                    "exit_plan_mode",
+                    *cfg.disabled_tools,
+                )
+            )
+        )
+        argv += ["--exclude-tools", ",".join(disabled)]
+        for field, flag in (
+            ("max_turns", "--max-session-turns"),
+            ("max_tool_calls", "--max-tool-calls"),
+            ("max_subagent_depth", "--max-subagent-depth"),
+        ):
+            if getattr(cfg, field) is not None:
+                argv += [flag, str(getattr(cfg, field))]
+        return argv
+
+    async def launch(self, prompt: str) -> AgentRunResult:
+        self._prepare_run()
+        wd = Path(self.executor.work_dir)
+        env = self._build_env(self.config)
+        secrets = secret_values(self.config, env)
+        prompt_path = self._state_dir / "prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        for name in (*self.hot_artifacts, "qwen_code.pid"):
+            (wd / name).unlink(missing_ok=True)
+        mirror = TelemetryMirror(self._state_dir / "telemetry.raw", wd / "telemetry.jsonl", secrets)
+        native = NativeChatMirror(self._state_dir, wd / "native_chats.jsonl", secrets)
+        started = time.monotonic()
+        job = None
+        if os.name != "nt":
+            from ale_run.executors._sandbox_entry import _LinuxProcessTree
+
+            job = _LinuxProcessTree()
+        with prompt_path.open("rb") as source:
+            proc = await asyncio.create_subprocess_exec(
+                *self._build_argv(),
+                stdin=source,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self._cwd),
+                env=env,
+                start_new_session=os.name != "nt",
+                limit=64 * 1024 * 1024,
+            )
+        (wd / "qwen_code.pid").write_text(str(proc.pid), encoding="ascii")
+        state = {"terminal": None, "terminal_time": None, "mcp": False, "error": None}
+        readers = []
+        natural_exit = None
+
+        async def capture(stream, path: Path, events: bool = False):
+            with (
+                path.open("w", encoding="utf-8") as out,
+                (wd / "event_times.jsonl").open("a", encoding="utf-8") as times,
+            ):
+                index = 0
+                while line := await stream.readline():
+                    text = redact(line.decode("utf-8", "replace"), secrets)
+                    out.write(text)
+                    out.flush()
+                    if not events:
+                        continue
+                    try:
+                        event = json.loads(text)
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    times.write(
+                        json.dumps({"index": index, "timestamp": datetime.now(UTC).isoformat()})
+                        + "\n"
+                    )
+                    times.flush()
+                    index += 1
+                    if event.get("parent_tool_use_id"):
+                        continue
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        state["mcp"] = any(
+                            server.get("name") == "cua" and server.get("status") == "connected"
+                            for server in event.get("mcp_servers", [])
+                        )
+                        if not state["mcp"]:
+                            state["error"] = "qwen_code: required CUA MCP server did not connect"
+                    if event.get("type") == "result":
+                        state["terminal"] = event
+                        state["terminal_time"] = time.monotonic()
+
+        try:
+            if os.name == "nt":
+                job = assign_job(proc.pid)
+            readers = [
+                asyncio.create_task(capture(proc.stdout, wd / "stdout.log", True)),
+                asyncio.create_task(capture(proc.stderr, wd / "stderr.log")),
+            ]
+            while proc.returncode is None:
+                for reader in readers:
+                    if reader.done() and not reader.cancelled() and reader.exception():
+                        raise reader.exception()
+                if state["error"] or (
+                    state["terminal_time"]
+                    and time.monotonic() - state["terminal_time"] > _FINAL_EXIT_GRACE_S
+                ):
+                    break
+                await asyncio.to_thread(mirror.poll)
+                await asyncio.to_thread(native.poll)
+                await asyncio.sleep(0.1)
+        finally:
+            natural_exit = proc.returncode
+            cleanup = asyncio.create_task(stop_process(proc, job, _TERM_GRACE_S))
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            try:
+                await asyncio.wait_for(asyncio.gather(*readers), timeout=5)
+            finally:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+                await asyncio.to_thread(mirror.poll)
+                await asyncio.to_thread(native.poll)
+            if cancelled:
+                raise asyncio.CancelledError
+        terminal = state["terminal"] or {}
+        error = state["error"]
+        if not error and not state["mcp"]:
+            error = "qwen_code: no connected CUA MCP initialization event"
+        if not error and (terminal.get("subtype") != "success" or terminal.get("is_error")):
+            error = "qwen_code: missing successful terminal result: " + json.dumps(terminal)
+        if not error and natural_exit not in (None, 0):
+            error = f"qwen_code: process exited {proc.returncode}"
+        if error:
+            error += " | stderr: " + (wd / "stderr.log").read_text(encoding="utf-8")[-1500:]
+        return AgentRunResult(
+            status="failed" if error else "completed",
+            pid=proc.pid,
+            exit_code=proc.returncode,
+            transcript_path=str(wd / "stdout.log"),
+            stderr_path=str(wd / "stderr.log"),
+            duration_s=time.monotonic() - started,
+            error=redact(error, secrets),
+        )
 
     @classmethod
     def parse_artifacts(
@@ -281,8 +374,65 @@ class QwenCodeDeployer(BaseAgentDeployer):
             )
             return
 
-        for ev in events:
-            cls._consume_event(ev, builder)
+        times = {}
+        timing_file = work_dir / "event_times.jsonl"
+        if timing_file.exists():
+            for line in timing_file.read_text(encoding="utf-8").splitlines():
+                try:
+                    entry = json.loads(line)
+                    times[entry["index"]] = entry["timestamp"]
+                except (ValueError, KeyError):
+                    continue
+        children = {}
+        child_results = {}
+        for index, ev in enumerate(events):
+            parent = ev.get("parent_tool_use_id")
+            target = builder
+            if parent:
+                key = parent
+                if key not in children:
+                    children[key] = TrajectoryBuilder(
+                        agent_name="qwen_code",
+                        model=config.model,
+                        task_path=builder.trajectory.task_path,
+                        variant_index=builder.trajectory.variant_index,
+                    )
+                    children[key].trajectory.extra.update(
+                        {
+                            "parent_tool_use_id": parent,
+                            "session_id": ev.get("session_id"),
+                        }
+                    )
+                target = children[key]
+                if ev.get("type") == "result":
+                    child_results[key] = ev
+            before = len(target.trajectory.steps)
+            cls._consume_event(ev, target)
+            for step in target.trajectory.steps[before:]:
+                step.extra.update(
+                    {
+                        k: ev[k]
+                        for k in ("uuid", "session_id", "parent_tool_use_id", "partial")
+                        if k in ev
+                    }
+                )
+                if index in times:
+                    step.timestamp = times[index]
+                    step.extra["timestamp_source"] = "stdout_received"
+                else:
+                    step.extra["timestamp_source"] = "parse_time"
+        for key, child in children.items():
+            terminal = child_results.get(key)
+            if terminal:
+                child.finalize(
+                    reward=None,
+                    status="completed"
+                    if terminal.get("subtype") == "success" and not terminal.get("is_error")
+                    else "failed",
+                )
+            else:
+                child.trajectory.extra["completion_status"] = "unreported"
+            builder.trajectory.subagent_trajectories.append(child.trajectory)
 
         if result_summary:
             usage = (
@@ -329,10 +479,45 @@ class QwenCodeDeployer(BaseAgentDeployer):
             ):
                 builder.add_step(source="agent", message=response)
 
+        native_stats = enrich_native(work_dir, builder)
+        trajectories = [builder.trajectory, *builder.trajectory.subagent_trajectories]
+        calls = {
+            (i, call.id)
+            for i, traj in enumerate(trajectories)
+            for step in traj.steps
+            for call in step.tool_calls
+        }
+        results = {
+            (i, result.tool_call_id)
+            for i, traj in enumerate(trajectories)
+            for step in traj.steps
+            if step.observation
+            for result in step.observation.results
+        }
+        status_only = {
+            (i, result.tool_call_id)
+            for i, traj in enumerate(trajectories)
+            for step in traj.steps
+            if step.observation and step.extra.get("result_content_available") is False
+            for result in step.observation.results
+        }
         builder.trajectory.extra.setdefault("qwen_code", {}).update(
             {
+                "telemetry": summarize_telemetry(work_dir) if config.telemetry_enabled else None,
+                "tool_completeness": {
+                    **native_stats,
+                    "calls": len(calls),
+                    "matched_results": len(calls & results),
+                    "status_only_results": len(calls & status_only),
+                    "results_with_content": len(calls & (results - status_only)),
+                    "missing_results": sorted(calls - results),
+                    "orphan_results": sorted(results - calls),
+                },
                 "exit_code": run_result.exit_code,
                 "transcript_path": str(stdout_log),
+                "cost_available": bool(
+                    result_summary and result_summary.get("total_cost_usd") is not None
+                ),
                 "event_count": len(events),
                 "result_summary": result_summary,
             }
@@ -343,6 +528,7 @@ class QwenCodeDeployer(BaseAgentDeployer):
         """Separate stream events from the terminal result summary."""
         events: list[dict] = []
         result_summary: dict | None = None
+        pending: dict[tuple, dict] = {}
         for line in stdout_text.splitlines():
             line = line.strip()
             if not line:
@@ -353,18 +539,63 @@ class QwenCodeDeployer(BaseAgentDeployer):
                 continue
             if not isinstance(parsed, dict):
                 continue
-            if parsed.get("type") == "result":
+            key = (parsed.get("session_id"), parsed.get("parent_tool_use_id"))
+            if parsed.get("type") == "stream_event":
+                delta = parsed.get("event", {})
+                kind = delta.get("type")
+                if kind == "message_start":
+                    pending[key] = {
+                        **parsed,
+                        "type": "assistant",
+                        "partial": True,
+                        "message": {"content": []},
+                    }
+                current = pending.get(key)
+                if current is not None:
+                    blocks = current["message"]["content"]
+                    if kind == "content_block_start":
+                        blocks.append(dict(delta.get("content_block", {})))
+                    elif kind == "content_block_delta" and blocks:
+                        value = delta.get("delta", {})
+                        block = blocks[min(delta.get("index", len(blocks) - 1), len(blocks) - 1)]
+                        field = {
+                            "text_delta": "text",
+                            "thinking_delta": "thinking",
+                            "input_json_delta": "partial_json",
+                        }.get(value.get("type"))
+                        if field:
+                            block[field] = block.get(field, "") + value.get(field, "")
+            elif parsed.get("type") == "assistant":
+                pending.pop(key, None)
+            if parsed.get("type") == "result" and not parsed.get("parent_tool_use_id"):
                 result_summary = parsed
                 continue
             events.append(parsed)
+        for partial in pending.values():
+            for block in partial["message"]["content"]:
+                if "partial_json" in block:
+                    try:
+                        block["input"] = json.loads(block["partial_json"])
+                    except ValueError:
+                        block["input"] = {"partial_json": block["partial_json"]}
+            events.append(partial)
         return events, result_summary
 
     @classmethod
     def _consume_event(cls, event: dict, builder: TrajectoryBuilder) -> None:
         top_type = str(event.get("type") or "").strip()
 
-        if top_type in ("system", "stream_event"):
+        if top_type == "stream_event":
             return
+        if top_type == "result" and isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+            builder.override_final_metrics(
+                total_input_tokens=usage.get("input_tokens"),
+                total_output_tokens=usage.get("output_tokens"),
+                total_cache_read_tokens=usage.get("cache_read_input_tokens"),
+                total_cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+                total_cost_usd=event.get("total_cost_usd"),
+            )
 
         message = event.get("message") if isinstance(event.get("message"), dict) else None
         if top_type == "assistant" and message:
@@ -407,13 +638,15 @@ class QwenCodeDeployer(BaseAgentDeployer):
             elif btype == "thinking" and isinstance(block.get("thinking"), str):
                 reasoning_parts.append(block["thinking"])
             elif btype == "tool_use":
+                name = str(block.get("name") or "unknown")
+                arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
+                if name == "tool_call" and isinstance(arguments.get("name"), str):
+                    name, arguments = arguments["name"], arguments.get("arguments", {})
                 tool_calls.append(
                     ToolCall(
                         id=str(block.get("id") or ""),
-                        name=str(block.get("name") or "unknown"),
-                        arguments=block.get("input")
-                        if isinstance(block.get("input"), dict)
-                        else {},
+                        name=name,
+                        arguments=arguments if isinstance(arguments, dict) else {},
                     )
                 )
 
@@ -462,7 +695,7 @@ class QwenCodeDeployer(BaseAgentDeployer):
                                     image=ImageSource(
                                         type="base64",
                                         data=source["data"],
-                                        media_type=source.get("media_type"),
+                                        media_type=source.get("media_type") or "image/png",
                                     ),
                                 )
                             )
@@ -481,21 +714,3 @@ class QwenCodeDeployer(BaseAgentDeployer):
             source="environment",
             observation=Observation(results=results),
         )
-
-
-def _diagnose_failure(stderr_log: Path, stdout_log: Path, exit_code: int | None) -> str:
-    parts = [f"agent failed (rc={exit_code})"]
-    stderr_text = _read_text_tolerant(stderr_log)
-    stdout_text = _read_text_tolerant(stdout_log)
-    if stderr_text.strip():
-        parts.append(f"stderr tail: ...{stderr_text[-800:]}")
-    if stdout_text.strip():
-        parts.append(f"stdout tail: ...{stdout_text[-800:]}")
-    return " | ".join(parts)
-
-
-def _read_text_tolerant(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError):
-        return ""

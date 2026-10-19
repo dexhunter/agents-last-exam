@@ -1,9 +1,5 @@
-# qwen_code — QwenLM's coding-agent CLI (@qwen-code/qwen-code, npm), routed
-# through the Hugging Face Inference Providers router. Auth is env-var
-# driven (OPENAI_API_KEY/OPENAI_MODEL/OPENAI_BASE_URL); see
-# ale_run/agents/qwen_code/deployer.py's module docstring for why --bare is
-# never passed and why get_goal/list_agents are excluded.
-# Reference as:  agents: [ configs/agents/qwen_code_hf.yaml ]
+# Qwen Code via Hugging Face Inference Providers.
+# See ale_run/agents/qwen_code/README.md for configuration and validation.
 
 harness: qwen_code
 model: Qwen/Qwen3.5-9B

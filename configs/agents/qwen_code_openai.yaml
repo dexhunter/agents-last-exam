@@ -1,0 +1,11 @@
+# Validate the Qwen Code harness against OpenAI's Responses API.
+harness: qwen_code
+model: gpt-5.4-mini
+config:
+  cli_version: 0.25.3
+  base_url: https://api.openai.com/v1
+  api_key: ${env:OPENAI_API_KEY}
+  auth_type: openai-responses
+  reasoning_effort: high
+  coordinate_space: pixel
+  telemetry_enabled: true
