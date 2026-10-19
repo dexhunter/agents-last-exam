@@ -65,6 +65,15 @@
       60 seconds and retries once on timeout; other setup errors fail immediately.
     </p>
 
+    <p>
+      <a href="https://github.com/rdi-berkeley/agents-last-exam/tree/main/ale_run/agents/muse_code">Muse Code</a>
+      runs its pinned official CLI natively on Linux and Windows. Select
+      <code>configs/agents/muse_code.yaml</code> and set <code>META_API_KEY</code>.
+      It uses the same required CUA GUI bridge and pixel coordinates as the
+      Codex/Claude presets, with unattended execution and native session logs
+      for trajectories, screenshots, API usage, and tool timing.
+    </p>
+
     <h3>Out-of-sandbox</h3>
     <p>
       The agent's runtime stays <em>outside</em> the sandbox (in ALE's own

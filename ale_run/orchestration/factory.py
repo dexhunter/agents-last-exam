@@ -36,6 +36,7 @@ _AGENT_FQNS: dict[str, str] = {
     "grok_build": "ale_run.agents.grok_build.deployer.GrokBuildDeployer",
     "grok_cli": "ale_run.agents.grok_cli.deployer.GrokCliDeployer",
     "kimi_code": "ale_run.agents.kimi_code.deployer.KimiCodeDeployer",
+    "muse_code": "ale_run.agents.muse_code.deployer.MuseCodeDeployer",
     "cursor_cli": "ale_run.agents.cursor_cli.deployer.CursorCliDeployer",
     "droid": "ale_run.agents.droid.deployer.DroidDeployer",
     "openclaw_cli": "ale_run.agents.openclaw_cli.deployer.OpenClawCliDeployer",

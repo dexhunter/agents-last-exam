@@ -829,6 +829,7 @@ def _collect_env_passthrough() -> dict[str, str]:
         "XAI_API_KEY",
         "GROK_API_KEY",
         "MOONSHOT_API_KEY",
+        "META_API_KEY",
         "ZAI_API_KEY",
         "Z_AI_API_KEY",
         "FACTORY_API_KEY",
