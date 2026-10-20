@@ -238,7 +238,9 @@ class AleClawDeployer(BaseAgentDeployer):
             default_model=cfg.model,
             auxiliary_model=cfg.auxiliary_model,
             thinking_params=thinking_api_params,
+            thinking_config=thinking_config,
             gui_thinking_params=gui_thinking_params,
+            generation_kwargs=cfg.extra_generation_kwargs,
             disable_main_computer=cfg.disable_main_computer,
             disable_delegate_gui=cfg.disable_delegate_gui,
             gui_model=gui_model,
@@ -433,4 +435,6 @@ class AleClawDeployer(BaseAgentDeployer):
         return ThinkingConfig(
             level=level, flush_level=flush, compaction_level=compact,
             vision_level=vision, gui_level=gui,
+            flush_level_overridden=c.flush_thinking_level is not None,
+            compaction_level_overridden=c.compaction_thinking_level is not None,
         )

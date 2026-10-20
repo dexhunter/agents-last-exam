@@ -1,14 +1,11 @@
-"""OpenClawCliDeployer — drives ``openclaw agent --local``.
+"""OpenClawCliDeployer with an episode-local OpenClaw gateway.
 
-Fork tarball + native CUA plugin (not MCP).  The deployer expects both
-the tarball and plugin source to be available inside the sandbox at
-configurable paths (baked into the image or volume-mounted).
+Official npm package by default, with a native CUA plugin (not MCP).
 
-Config files written: ``openclaw.json``, ``auth-profiles.json``,
-``exec-approvals.json``, ``workspace-state.json``.
+Config files written: ``openclaw.json``, ``auth-profiles.json``, and
+``workspace-state.json``.
 
-Output: JSON envelope on stderr (``--json`` flag), plus session
-trajectory JSONL at ``~/.openclaw/agents/main/sessions/``.
+Output: JSON envelope on stdout or stderr, plus the agent session transcript.
 """
 from __future__ import annotations
 
@@ -17,9 +14,13 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
+import socket
+import sqlite3
 import subprocess
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar
@@ -37,6 +38,7 @@ from ale_run.base_interface import (
 )
 
 from .config import CUA_TOOL_NAMES, OpenClawCliConfig
+from .runtime import install_cli
 from .vision import (
     VisionUsageProxy,
     persist_transcript_images,
@@ -49,17 +51,55 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 2.0
 _TERM_GRACE_S = 2.0
+_FINAL_EXIT_GRACE_S = 10.0
+_STATE_READ_TIMEOUT_S = 15.0
+_SUBAGENT_DELIVERY_TIMEOUT_S = 60.0
+_SUBAGENT_POLL_S = 1.0
+_SUBAGENT_SETTLE_S = 3.0
 _AGENT_ID = "main"
 _PLUGIN_PROVIDER_IDS = frozenset({"anthropic", "openai", "openrouter", "zai"})
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _serialize_cua_tools(plugin_dir: Path) -> None:
+    """Keep desktop actions in model-specified order within a tool batch."""
+    entry = plugin_dir / "dist" / "index.cjs"
+    original = entry.with_name("index-upstream.cjs")
+    entry.rename(original)
+    entry.write_text(
+        '''const upstream = require("./index-upstream.cjs");
+const register = upstream.default ?? upstream;
+exports.default = function (api) {
+  return register(new Proxy(api, {
+    get(target, key, receiver) {
+      if (key === "registerTool") {
+        return (tool, options) => target.registerTool(
+          {...tool, executionMode: "sequential"}, options
+        );
+      }
+      return Reflect.get(target, key, receiver);
+    }
+  }));
+};
+''',
+        encoding="utf-8",
+    )
+
+
 class OpenClawCliDeployer(BaseAgentDeployer):
-    """Stdlib-only deployer for ``openclaw agent --local``."""
+    """Stdlib-only deployer for ``openclaw agent`` and its gateway."""
 
     default_executor: ClassVar[str] = "sandbox"
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
-    hot_artifacts: ClassVar[tuple[str, ...]] = ("stderr.log",)
+    hot_artifacts: ClassVar[tuple[str, ...]] = ("stdout.log", "stderr.log", "gateway.log")
+
+    @property
+    def version(self) -> str:
+        return self.config.cli_version
+
+    @property
+    def _state_dir(self) -> Path:
+        return getattr(self, "_episode_state_dir", Path.home() / ".openclaw")
 
     # =========================================================================
     # install
@@ -214,6 +254,24 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         if dist_src.exists():
             (install_dir / "dist").mkdir(exist_ok=True)
             shutil.copy2(str(dist_src), str(install_dir / "dist" / "index.cjs"))
+        if not (install_dir / "dist" / "index.cjs").is_file():
+            raise RuntimeError("openclaw_cli: CUA plugin build did not produce its entrypoint")
+        manifest_path = install_dir / "openclaw.plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("contracts", {})["tools"] = list(CUA_TOOL_NAMES)
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        package_path = install_dir / "package.json"
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        # esbuild bundles the plugin's dependencies into index.cjs.
+        package.pop("dependencies", None)
+        package.pop("devDependencies", None)
+        package_path.write_text(json.dumps(package, indent=2), encoding="utf-8")
+        probe = await asyncio.to_thread(
+            subprocess.run, [self._node_path, str(install_dir / "dist" / "index.cjs"), "--selftest"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if probe.returncode != 0:
+            raise RuntimeError("openclaw_cli: CUA plugin self-test failed: " + probe.stderr[-500:])
         logger.info("openclaw_cli: CUA plugin installed at %s", install_dir)
 
     @staticmethod
@@ -429,9 +487,8 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 setattr(self, attribute, None)
 
     def _write_config(self, cfg: OpenClawCliConfig) -> None:
-        """Write openclaw.json, auth-profiles.json, exec-approvals, workspace-state."""
-        home = os.path.expanduser("~")
-        oc_home = Path(home) / ".openclaw"
+        """Write the OpenClaw configuration, credentials, and workspace state."""
+        oc_home = self._state_dir
         oc_home.mkdir(parents=True, exist_ok=True)
 
         # Explicit, provider-driven routing (not key-presence inference).
@@ -486,19 +543,20 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         # The resolved provider's plugin must be enabled for its auth
         # profile to load (e.g. "anthropic" is not in the default allow set).
         plugins_allow = list(cfg.plugins_allow)
-        for required_provider in (provider, vision_provider):
-            if (
-                required_provider in _PLUGIN_PROVIDER_IDS
-                and required_provider not in plugins_allow
-            ):
-                plugins_allow.append(required_provider)
+        if plugins_allow:
+            for required_provider in (provider, vision_provider):
+                if (
+                    required_provider in _PLUGIN_PROVIDER_IDS
+                    and required_provider not in plugins_allow
+                ):
+                    plugins_allow.append(required_provider)
         tools_also_allow = list(CUA_TOOL_NAMES)
         agent_defaults: dict = {
             "model": {"primary": primary_model},
             "timeoutSeconds": int(cfg.agent_timeout_s),
-            "llm": {
-                "idleTimeoutSeconds": int(cfg.llm_idle_timeout_s),
-            },
+            # Keep doctor from migrating the per-model settings into a legacy
+            # model allowlist. An empty policy preserves upstream's default.
+            "modelPolicy": {"allow": []},
             "models": {
                 primary_model: (
                     {"params": cfg.model_params}
@@ -507,18 +565,14 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 ),
             },
         }
-        # Only add heartbeat config when a valid duration is specified;
-        # "never" is not a valid duration string for the openclaw CLI
-        # (it expects ms, s, m, h suffixes).  Omitting the key disables it.
-        if cfg.heartbeat_every and cfg.heartbeat_every.lower() != "never":
-            agent_defaults["heartbeat"] = {"every": cfg.heartbeat_every}
+        if cfg.heartbeat_every:
+            heartbeat = "0m" if cfg.heartbeat_every.lower() == "never" else cfg.heartbeat_every
+            agent_defaults["heartbeat"] = {"every": heartbeat}
         oc_config = {
             "agents": {
                 "defaults": agent_defaults,
             },
             "plugins": {
-                "allow": plugins_allow,
-                "deny": list(cfg.plugins_deny),
                 # Point the native CUA plugin at this image's cua-server. The
                 # plugin defaults to localhost:5000 (correct on GCE); ale-kasm
                 # runs cua-server on 8000, so set it explicitly from the
@@ -533,42 +587,23 @@ class OpenClawCliDeployer(BaseAgentDeployer):
             },
             "tools": {
                 "alsoAllow": tools_also_allow,
-                "deny": list(cfg.tools_deny),
-                # yolo exec policy: without this, exec/shell tool calls hit
-                # the device-pairing scope-upgrade flow and fail on a
-                # headless sandbox with no human to approve. Matches the
-                # exec-approvals.json defaults written below.
-                "exec": {
-                    "host": "gateway",
-                    "security": "full",
-                    "ask": "off",
-                },
             },
             "gateway": {
                 "mode": "local",
                 "bind": "loopback",
+                "auth": {"mode": "token"},
             },
         }
+        if plugins_allow:
+            oc_config["plugins"]["allow"] = plugins_allow
+        if cfg.plugins_deny:
+            oc_config["plugins"]["deny"] = list(cfg.plugins_deny)
+        if cfg.tools_deny:
+            oc_config["tools"]["deny"] = list(cfg.tools_deny)
         if cfg.vision_model:
             vision_model = self._route_model(cfg.vision_model, vision_provider)
             agent_defaults["imageModel"] = {"primary": vision_model}
             agent_defaults["models"].setdefault(vision_model, {})
-            # openclaw schema (v2026.4.26): tools.media.image.models is an
-            # ARRAY of {provider, model} entries (ordered preference list),
-            # not a map. OpenRouter keeps vendor-prefixed model ids while
-            # native providers receive their bare model id.
-            vm = cfg.vision_model
-            if vision_provider == "openrouter":
-                vision_entry = {"provider": "openrouter", "model": vm}
-            else:
-                head, _, tail = vm.partition("/")
-                vision_entry = {
-                    "provider": vision_provider,
-                    "model": tail if tail and head == vision_provider else vm,
-                }
-            oc_config["tools"]["media"] = {
-                "image": {"models": [vision_entry]},
-            }
         # Custom OpenAI-compatible endpoint for the resolved provider. openclaw
         # reads ``models.providers.<id>.baseUrl`` to override a provider's
         # built-in endpoint — used to point the (chat-completions) openrouter
@@ -654,21 +689,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
             json.dumps(oc_config, indent=2), encoding="utf-8",
         )
 
-        # --- exec-approvals.json (yolo) ---
-        approvals = {
-            "version": 1,
-            "defaults": {
-                "security": "full",
-                "ask": "off",
-                "askFallback": "full",
-            },
-            "socket": {},
-            "agents": {},
-        }
-        (oc_home / "exec-approvals.json").write_text(
-            json.dumps(approvals, indent=2), encoding="utf-8",
-        )
-
         # --- auth-profiles.json ---
         agent_dir = oc_home / "agents" / _AGENT_ID / "agent"
         agent_dir.mkdir(parents=True, exist_ok=True)
@@ -720,7 +740,7 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         logger.info("openclaw_cli: config staged at %s", oc_home)
 
     def _complete_workspace_bootstrap(self, oc_home: Path | None = None) -> None:
-        """Mark OpenClaw's workspace bootstrap complete so ``agent --local``
+        """Mark OpenClaw's workspace bootstrap complete so ``agent``
         skips the interactive wizard.
 
         Mirrors agenthle's verified Windows/Linux path. OpenClaw resolves its
@@ -736,7 +756,7 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         single implementation covers Linux and Windows. Idempotent.
         """
         if oc_home is None:
-            oc_home = Path(os.path.expanduser("~")) / ".openclaw"
+            oc_home = self._state_dir
         workspace = oc_home / "workspace"
         ws_state_dir = workspace / ".openclaw"
         ws_state_dir.mkdir(parents=True, exist_ok=True)
@@ -782,58 +802,26 @@ class OpenClawCliDeployer(BaseAgentDeployer):
     async def install(self) -> None:
         cfg: OpenClawCliConfig = self.config  # type: ignore[assignment]
 
-        # Ensure node/npm reachable (on Windows node ships off PATH).
-        from ale_run.agents._bootstrap import ensure_npm
-        await ensure_npm()
+        from ale_run.agents._bootstrap import ensure_node_npm
+        from ale_run.agents.qwen_code.runtime import command
 
-        # 1. Install openclaw CLI.
-        # The sandbox entry runs without the login-shell environment, so a
-        # pre-baked openclaw under ~/.npm-global/bin or ~/.local/bin is NOT
-        # on PATH and shutil.which would miss it — triggering a needless (and
-        # historically flaky) tarball re-install. Augment PATH with the common
-        # user-level npm bin dirs first so a complete pre-baked install is
-        # preferred over a fresh download. (<prefix> itself for Windows shims,
-        # <prefix>/bin for Linux.)
+        node, npm = await ensure_node_npm()
+        tarball = cfg.tarball_path
+        if tarball and not Path(tarball).is_file():
+            if not cfg.tarball_url:
+                raise RuntimeError(f"openclaw_cli: tarball not found: {tarball}")
+            tarball = await self._download_tarball(cfg.tarball_url)
+        elif not tarball and cfg.tarball_url:
+            tarball = await self._download_tarball(cfg.tarball_url)
+        self._node_path, self._openclaw_path = await install_cli(
+            node, npm, cfg.cli_version, tarball,
+        )
+        self.actual_cli_version = cfg.cli_version
+        self.cli_source = "custom" if tarball else "official"
         home = os.path.expanduser("~")
-        for bin_dir in (
-            os.path.join(home, ".npm-global", "bin"),
-            os.path.join(home, ".local", "bin"),
-            os.path.join(home, ".local"),
-        ):
-            if os.path.isdir(bin_dir) and bin_dir not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
-
-        openclaw_path = shutil.which("openclaw")
-        if not openclaw_path:
-            tarball = cfg.tarball_path
-            if not Path(tarball).exists() and cfg.tarball_url:
-                logger.info("openclaw_cli: tarball not at %s, downloading from %s",
-                            tarball, cfg.tarball_url)
-                tarball = await self._download_tarball(cfg.tarball_url)
-            if not Path(tarball).exists():
-                raise RuntimeError(
-                    f"OpenClawCliDeployer: 'openclaw' not on PATH and "
-                    f"tarball not found at {tarball}. Set tarball_url in config "
-                    f"or bake into the sandbox image."
-                )
-            logger.info("openclaw_cli: installing from tarball %s", tarball)
-            await self._install_from_tarball(tarball)
-            openclaw_path = shutil.which("openclaw")
-            if not openclaw_path:
-                raise RuntimeError(
-                    "OpenClawCliDeployer: 'openclaw' still not found after install"
-                )
-        self._openclaw_path = openclaw_path
-
-        try:
-            probe = await asyncio.to_thread(
-                subprocess.run,
-                [openclaw_path, "--version"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"openclaw --version timed out: {e}")
-        logger.info("openclaw_cli: CLI ok — %s", (probe.stdout or "").strip())
+        self._episode_state_dir = Path(home) / ".ale-openclaw" / "states" / str(uuid.uuid4())
+        self._episode_state_dir.mkdir(mode=0o700, parents=True)
+        self._gateway_token = secrets.token_urlsafe(32)
 
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)
@@ -841,7 +829,19 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         # 2. Build CUA plugin (if source available and not already installed)
         home = os.path.expanduser("~")
         plugin_entry = Path(home) / ".openclaw" / "extensions" / "cua" / "dist" / "index.cjs"
-        if not plugin_entry.exists():
+        manifest_path = plugin_entry.parent.parent / "openclaw.plugin.json"
+        package_path = plugin_entry.parent.parent / "package.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            plugin_ready = (
+                plugin_entry.is_file()
+                and set(manifest.get("contracts", {}).get("tools", ())) == set(CUA_TOOL_NAMES)
+                and not package.get("dependencies")
+            )
+        except (OSError, ValueError):
+            plugin_ready = False
+        if not plugin_ready:
             plugin_src = cfg.cua_plugin_path
             if not Path(plugin_src).is_dir() and cfg.cua_plugin_repo:
                 logger.info("openclaw_cli: CUA plugin not at %s, cloning from %s",
@@ -853,13 +853,13 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 logger.info("openclaw_cli: building CUA plugin from %s", plugin_src)
                 await self._build_cua_plugin(plugin_src)
             else:
-                logger.warning(
-                    "openclaw_cli: CUA plugin source not found at %s — "
-                    "computer tools will be unavailable",
-                    plugin_src,
-                )
+                raise RuntimeError(f"openclaw_cli: CUA plugin source not found at {plugin_src}")
         else:
             logger.info("openclaw_cli: CUA plugin already installed")
+
+        episode_plugin = self._state_dir / "extensions" / "cua"
+        shutil.copytree(plugin_entry.parent.parent, episode_plugin)
+        _serialize_cua_tools(episode_plugin)
 
         # 3. Start any provider compatibility proxy before writing config.
         self._start_primary_compat_proxy(cfg, wd)
@@ -872,6 +872,29 @@ class OpenClawCliDeployer(BaseAgentDeployer):
             # 5. Write config files
             self._write_config(cfg)
 
+            env = self._build_env(cfg, self._state_dir / ".env")
+            doctor = await command(
+                self._launch_prefix() + ["doctor", "--fix", "--non-interactive"],
+                env=env, timeout=600,
+            )
+            if doctor.returncode != 0:
+                raise RuntimeError("openclaw_cli: credential migration failed: " + doctor.stderr[-1000:])
+            inspection = await command(
+                self._launch_prefix() + ["plugins", "inspect", "cua", "--runtime", "--json"],
+                env=env, timeout=180,
+            )
+            try:
+                plugin = json.loads(inspection.stdout)["plugin"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise RuntimeError("openclaw_cli: could not inspect CUA plugin") from exc
+            if (inspection.returncode != 0 or plugin.get("status") != "loaded"
+                    or set(plugin.get("toolNames", ())) != set(CUA_TOOL_NAMES)):
+                raise RuntimeError("openclaw_cli: CUA plugin failed to load all required tools: "
+                                   + str(plugin.get("error") or plugin.get("toolNames")))
+            logger.warning(
+                "openclaw_cli: llm_idle_timeout_s is unsupported by official OpenClaw %s; "
+                "the upstream model timeout policy applies", cfg.cli_version,
+            )
             # 6. Pre-warm the bundled-plugin runtime-deps mirror.
             await self._prewarm_plugin_runtime_mirror(cfg)
         except BaseException:
@@ -887,7 +910,7 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         plugins' dist tree (~60 plugins, thousands of files) into
         ``~/.openclaw/plugin-runtime-deps/.../dist/extensions/`` under a
         filesystem lock. On Windows this recursive copy takes minutes; if it
-        runs inside ``agent --local`` it produces no stdout/stderr until done
+        runs inside ``agent`` it produces no stdout/stderr until done
         and blows the agent's wall budget — the silent runtime hang. The mirror
         is built once and reused (existing targets are skipped), so a cheap
         ``models list`` here (which loads the same provider plugins) pays the
@@ -897,10 +920,7 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         pay (or re-pay) the mirror cost itself.
         """
         argv = self._launch_prefix() + ["models", "list"]
-        env = os.environ.copy()
-        for k, v in (self.executor.env or {}).items():
-            env[k] = v
-        env["NO_COLOR"] = "1"
+        env = self._build_env(cfg, self._state_dir / ".env")
         try:
             t0 = time.monotonic()
             proc = await asyncio.to_thread(
@@ -929,6 +949,221 @@ class OpenClawCliDeployer(BaseAgentDeployer):
     # launch
     # =========================================================================
 
+    async def _start_gateway(self, env: dict[str, str], wd: Path, tree):
+        from ale_run.agents.qwen_code.runtime import assign_job, command, stop_process
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        config_path = self._state_dir / "openclaw.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["gateway"]["port"] = port
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        env["OPENCLAW_GATEWAY_TOKEN"] = self._gateway_token
+        env["OPENCLAW_GATEWAY_PORT"] = str(port)
+        with (wd / "gateway.log").open("wb") as log:
+            proc = await asyncio.create_subprocess_exec(
+                *self._launch_prefix(), "gateway", "run", "--bind", "loopback",
+                "--port", str(port), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, env=env, cwd=str(wd),
+                start_new_session=os.name != "nt",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        job = tree
+        try:
+            if os.name == "nt":
+                job = assign_job(proc.pid)
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                if proc.returncode is not None:
+                    raise RuntimeError(f"OpenClaw gateway exited with code {proc.returncode}")
+                try:
+                    check = await command(
+                        self._launch_prefix() + ["gateway", "call", "health", "--json", "--timeout", "2000"],
+                        env=env, timeout=6,
+                    )
+                    if check.returncode == 0:
+                        return proc, job
+                except asyncio.TimeoutError:
+                    pass
+                await asyncio.sleep(1)
+            raise RuntimeError("OpenClaw gateway did not become ready within 90 seconds")
+        except BaseException:
+            await stop_process(proc, job, _TERM_GRACE_S)
+            raise
+
+    async def _wait_for_subagents(self, envelope: dict | None, gateway=None) -> None:
+        expected = {
+            item["runId"]: item
+            for item in (envelope or {}).get("acceptedSessionSpawns", [])
+            if isinstance(item, dict) and isinstance(item.get("runId"), str)
+        }
+        state_db = self._state_dir / "state" / "openclaw.sqlite"
+        agent_db = self._state_dir / "agents" / _AGENT_ID / "agent" / "openclaw-agent.sqlite"
+        settled_at = None
+        read_error_since = None
+        missing_since = time.monotonic()
+        archived_since: dict[str, float] = {}
+        delivered: set[str] = set()
+        while True:
+            if gateway is not None and gateway.returncode is not None:
+                raise RuntimeError("OpenClaw gateway exited while subagents were running")
+            try:
+                with sqlite3.connect(state_db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1) as db:
+                    rows = db.execute("SELECT run_id, payload_json FROM subagent_runs").fetchall()
+                runs = {run_id: json.loads(payload) for run_id, payload in rows}
+                missing = expected.keys() - runs.keys()
+                if not runs and not missing:
+                    return
+                unfinished = any(
+                    run.get("execution", {}).get("status") != "terminal"
+                    or run.get("delivery", {}).get("status") not in {
+                        "delivered", "not_required", "discarded", "failed",
+                    }
+                    for run in runs.values()
+                )
+                with sqlite3.connect(agent_db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1) as db:
+                    archives = set()
+                    if missing and db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_transcript_archives'"
+                    ).fetchone():
+                        archives = {row[0] for row in db.execute(
+                            "SELECT session_key FROM session_transcript_archives WHERE reason='deleted'"
+                        )}
+                    absent = {
+                        run_id for run_id in missing
+                        if expected[run_id].get("childSessionKey") not in archives
+                    }
+                    if absent:
+                        if time.monotonic() - missing_since > _STATE_READ_TIMEOUT_S:
+                            raise RuntimeError("OpenClaw did not persist an accepted subagent run")
+                        await asyncio.sleep(_SUBAGENT_POLL_S)
+                        continue
+                    active = db.execute(
+                        "SELECT COUNT(*) FROM session_nodes WHERE status IN ('running', 'active')"
+                    ).fetchone()[0]
+                    pending_delivery = False
+                    for run_id in missing:
+                        if expected[run_id].get("expectsCompletionMessage") is False:
+                            continue
+                        archived_since.setdefault(run_id, time.monotonic())
+                        if run_id not in delivered:
+                            pattern = f"%{run_id}%"
+                            delivered_row = db.execute(
+                                "SELECT 1 FROM session_nodes WHERE "
+                                "json_extract(entry_json, '$.lastRunId') LIKE ? OR "
+                                "json_extract(entry_json, '$.activeWriterRunId') LIKE ? LIMIT 1",
+                                (pattern, pattern),
+                            ).fetchone() or db.execute(
+                                "SELECT 1 FROM transcript_events WHERE event_json IS NOT NULL AND "
+                                "json_extract(event_json, '$.message.role') = 'assistant' AND "
+                                "json_extract(event_json, '$.message.__openclaw.runId') LIKE ? LIMIT 1",
+                                (pattern,),
+                            ).fetchone()
+                            if delivered_row:
+                                delivered.add(run_id)
+                        if run_id not in delivered:
+                            if not active and time.monotonic() - archived_since[run_id] > _SUBAGENT_DELIVERY_TIMEOUT_S:
+                                raise RuntimeError("OpenClaw archived a subagent without a completion delivery")
+                            pending_delivery = True
+                read_error_since = None
+            except (sqlite3.Error, json.JSONDecodeError) as exc:
+                if read_error_since is None:
+                    read_error_since = time.monotonic()
+                elif time.monotonic() - read_error_since >= _STATE_READ_TIMEOUT_S:
+                    raise RuntimeError("OpenClaw subagent state could not be read") from exc
+                await asyncio.sleep(_SUBAGENT_POLL_S)
+                continue
+            if unfinished or active or pending_delivery:
+                settled_at = None
+            elif settled_at is None:
+                settled_at = time.monotonic()
+            elif time.monotonic() - settled_at >= _SUBAGENT_SETTLE_S:
+                return
+            await asyncio.sleep(_SUBAGENT_POLL_S)
+
+    async def _export_child_transcripts(self, wd: Path, envelope: dict | None = None) -> None:
+        database = self._state_dir / "agents" / _AGENT_ID / "agent" / "openclaw-agent.sqlite"
+        expected = {
+            item.get("childSessionKey")
+            for item in (envelope or {}).get("acceptedSessionSpawns", [])
+            if isinstance(item, dict) and isinstance(item.get("childSessionKey"), str)
+        }
+        children_dir = wd / "subagents"
+        try:
+            with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+                rows = db.execute(
+                    "SELECT session_key, current_session_id, parent_session_key, status, entry_json "
+                    "FROM session_nodes WHERE parent_session_key IS NOT NULL ORDER BY created_at"
+                ).fetchall()
+                archives = []
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_transcript_archives'"
+                ).fetchone():
+                    archives = db.execute(
+                        "SELECT session_key, session_id FROM session_transcript_archives "
+                        "WHERE reason='deleted' AND session_key LIKE ? ORDER BY created_at",
+                        (f"agent:{_AGENT_ID}:subagent:%",),
+                    ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("openclaw_cli: could not list child sessions: %s", exc)
+            children_dir.mkdir(parents=True, exist_ok=True)
+            (children_dir / "index.json").write_text(
+                json.dumps({"error": "child session index unavailable"}), encoding="utf-8",
+            )
+            return
+        known = {row[0] for row in rows}
+        for session_key, session_id in archives:
+            if session_key not in known:
+                rows.append((session_key, session_id, None, "archived", "{}"))
+                known.add(session_key)
+        if not rows and not expected:
+            return
+        children_dir.mkdir(parents=True, exist_ok=True)
+        children = []
+        for session_key, session_id, parent_key, status, entry_json in rows:
+            try:
+                session_id = str(uuid.UUID(session_id))
+                entry = json.loads(entry_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            destination = children_dir / f"{session_id}.jsonl"
+            await self._export_session_transcript(session_id, destination)
+            if destination.exists():
+                try:
+                    stage_transcript_file_images(destination, children_dir, self._state_dir / "workspace")
+                except Exception as exc:
+                    logger.warning("openclaw_cli: failed to stage child transcript images: %s", exc)
+            children.append({
+                "session_id": session_id, "session_key": session_key,
+                "parent_session_key": parent_key, "status": status,
+                "model": entry.get("model"), "provider": entry.get("modelProvider"),
+                "transcript": destination.name if destination.exists() else None,
+            })
+        for key in sorted(expected - {record["session_key"] for record in children}):
+            children.append({"session_key": key, "transcript": None})
+        by_key = {record["session_key"]: record for record in children}
+        main_key = ((envelope or {}).get("meta", {}).get("agentMeta", {}).get("sessionFile"))
+        sources = [(main_key, wd / "transcript.jsonl")]
+        sources.extend((record["session_key"], children_dir / record["transcript"])
+                       for record in children if record.get("transcript"))
+        for parent_key, transcript in sources:
+            if not parent_key or not transcript.is_file():
+                continue
+            for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    message = json.loads(line).get("message", {})
+                except (ValueError, AttributeError):
+                    continue
+                details = message.get("details") if isinstance(message, dict) else None
+                if isinstance(details, dict) and isinstance(details.get("result"), dict):
+                    details = details["result"].get("details")
+                if isinstance(details, dict) and details.get("status") == "accepted":
+                    child = by_key.get(details.get("childSessionKey"))
+                    if child is not None:
+                        child["parent_session_key"] = parent_key
+        (children_dir / "index.json").write_text(json.dumps(children, indent=2), encoding="utf-8")
+
     async def launch(self, prompt: str) -> AgentRunResult:
         cfg: OpenClawCliConfig = self.config  # type: ignore[assignment]
         wd = Path(self.executor.work_dir)
@@ -954,118 +1189,142 @@ class OpenClawCliDeployer(BaseAgentDeployer):
 
         prompt_file.write_text(prompt, encoding="utf-8")
 
-        home = os.path.expanduser("~")
-        env_file = Path(home) / ".openclaw" / ".env"
+        env_file = self._state_dir / ".env"
+        session_id = str(uuid.uuid4())
         argv = self._launch_prefix() + [
-            "agent", "--local",
+            "agent",
             "--agent", _AGENT_ID,
-            "--message", prompt,
+            "--session-id", session_id,
+            "--message-file", str(prompt_file),
             "--json",
             "--timeout", str(int(cfg.agent_timeout_s)),
             "--thinking", cfg.thinking,
         ]
         env = self._build_env(cfg, env_file)
 
+        from ale_run.agents.qwen_code.runtime import assign_job, stop_process
+
+        tree = None
+        if os.name != "nt":
+            from ale_run.executors._sandbox_entry import _LinuxProcessTree
+            tree = _LinuxProcessTree()
         t0 = time.monotonic()
-        with open(stdout_log, "wb") as fout, \
-             open(stderr_log, "wb") as ferr:
-            proc = await asyncio.to_thread(
-                subprocess.Popen,
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=fout,
-                stderr=ferr,
-                env=env,
-                cwd=str(wd),
-                start_new_session=True if hasattr(os, "setsid") else False,
-            )
-        pid_file.write_text(str(proc.pid), encoding="ascii")
-        logger.info("openclaw_cli: spawned pid=%s", proc.pid)
-
-        result_envelope: dict | None = None
-        last_stderr_size = -1
+        gateway = gateway_job = proc = None
         try:
-            while proc.poll() is None:
-                try:
-                    stderr_size = stderr_log.stat().st_size
-                except OSError:
-                    stderr_size = -1
-                if stderr_size > 0 and stderr_size != last_stderr_size:
-                    last_stderr_size = stderr_size
-                    candidate = _parse_stderr_json(_read_text_tolerant(stderr_log))
-                    if _is_result_envelope(candidate):
-                        result_envelope = candidate
-                        logger.info(
-                            "openclaw_cli: result envelope complete while pid=%s remains alive",
-                            proc.pid,
-                        )
-                        break
-                await asyncio.sleep(_POLL_INTERVAL_S)
-        except asyncio.CancelledError:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(proc.wait), timeout=_TERM_GRACE_S,
+            gateway, gateway_job = await self._start_gateway(env, wd, tree)
+            with open(stdout_log, "wb") as fout, open(stderr_log, "wb") as ferr:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr,
+                    env=env, cwd=str(wd), start_new_session=os.name != "nt",
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            self._stop_vision_usage_proxy()
-            raise
+            pid_file.write_text(str(proc.pid), encoding="ascii")
+            logger.info("openclaw_cli: spawned pid=%s", proc.pid)
+            result_envelope: dict | None = None
+            envelope_time: float | None = None
+            cli_job = None
+            try:
+                if os.name == "nt":
+                    cli_job = assign_job(proc.pid)
+                while proc.returncode is None:
+                    if gateway is not None and gateway.returncode is not None:
+                        raise RuntimeError("OpenClaw gateway exited during the agent run")
+                    candidate = _result_from_logs(stdout_log, stderr_log)
+                    if candidate is not None and envelope_time is None:
+                        result_envelope = candidate
+                        envelope_time = time.monotonic()
+                    if envelope_time is not None and time.monotonic() - envelope_time >= _FINAL_EXIT_GRACE_S:
+                        break
+                    await asyncio.sleep(_POLL_INTERVAL_S)
+            finally:
+                exit_code = proc.returncode
+                await stop_process(proc, cli_job, _TERM_GRACE_S)
 
-        self._stop_vision_usage_proxy()
-        duration_s = time.monotonic() - t0
-        exit_code = proc.returncode
-        if result_envelope is None:
-            candidate = _parse_stderr_json(_read_text_tolerant(stderr_log))
-            if _is_result_envelope(candidate):
-                result_envelope = candidate
-        envelope_error = _result_envelope_error(result_envelope)
-        if envelope_error:
-            status = "failed"
-        elif result_envelope is not None or exit_code == 0:
-            status = "completed"
-        else:
-            status = "failed"
-        error: str | None = None
-        if envelope_error:
-            error = envelope_error
-        elif status == "failed":
-            error = _diagnose_failure(stderr_log, exit_code)
+            if result_envelope is None:
+                result_envelope = _result_from_logs(stdout_log, stderr_log)
+            envelope_error = _result_envelope_error(result_envelope)
+            if envelope_error:
+                status, error = "failed", envelope_error
+            elif result_envelope is not None and exit_code in (0, None):
+                status, error = "completed", None
+                await self._wait_for_subagents(result_envelope, gateway)
+            else:
+                status = "failed"
+                error = _diagnose_failure(stderr_log, exit_code)
+                if result_envelope is None:
+                    error += " | no valid OpenClaw result envelope"
 
-        # Copy session trajectory to work_dir for gathering
-        if result_envelope is not None:
-            session_id = result_envelope.get("meta", {}).get("agentMeta", {}).get("sessionId")
-        else:
-            session_id = self._extract_session_id(stderr_log)
-        if session_id:
-            src = Path(home) / ".openclaw" / "agents" / _AGENT_ID / "sessions" / f"{session_id}.jsonl"
+            session_id = (
+                (result_envelope or {}).get("meta", {}).get("agentMeta", {}).get("sessionId")
+                or session_id
+            )
+            src = self._state_dir / "agents" / _AGENT_ID / "sessions" / f"{session_id}.jsonl"
             dst = wd / "transcript.jsonl"
             if src.exists():
                 shutil.copy2(str(src), str(dst))
+            else:
+                await self._export_session_transcript(session_id, dst)
+            if dst.exists():
                 try:
-                    stage_transcript_file_images(dst, wd)
+                    stage_transcript_file_images(dst, wd, self._state_dir / "workspace")
                 except Exception as exc:
-                    logger.warning(
-                        "openclaw_cli: failed to stage transcript images: %s",
-                        exc,
-                    )
-                logger.info("openclaw_cli: copied session trajectory to %s", dst)
+                    logger.warning("openclaw_cli: failed to stage transcript images: %s", exc)
+            await self._export_child_transcripts(wd, result_envelope)
+            return AgentRunResult(
+                status=status, pid=proc.pid, exit_code=exit_code,
+                transcript_path=str(dst), stderr_path=str(stderr_log),
+                duration_s=time.monotonic() - t0, error=error,
+            )
+        finally:
+            try:
+                if gateway is not None:
+                    cleanup = asyncio.create_task(stop_process(gateway, gateway_job, _TERM_GRACE_S))
+                    cancelled = False
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    cleanup.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+            finally:
+                self._stop_vision_usage_proxy()
 
-        return AgentRunResult(
-            status=status,
-            pid=proc.pid,
-            exit_code=exit_code,
-            transcript_path=str(wd / "transcript.jsonl"),
-            stderr_path=str(stderr_log),
-            duration_s=duration_s,
-            error=error,
+    async def _export_session_transcript(self, session_id: str, destination: Path) -> None:
+        from ale_run.agents.qwen_code.runtime import command
+
+        database = self._state_dir / "agents" / _AGENT_ID / "agent" / "openclaw-agent.sqlite"
+        if not database.is_file():
+            logger.warning("openclaw_cli: session database is missing")
+            return
+        script = r'''
+const {DatabaseSync} = require("node:sqlite");
+const {zstdDecompressSync} = require("node:zlib");
+const db = new DatabaseSync(process.argv[1], {readOnly: true});
+const rows = db.prepare("SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq").all(process.argv[2]);
+if (rows.length) {
+  for (const row of rows) {
+    const text = row.event_json ?? zstdDecompressSync(row.event_zstd).toString("utf8");
+    process.stdout.write(text + "\n");
+  }
+} else {
+  const archive = db.prepare("SELECT encoding, archive_blob FROM session_transcript_archives WHERE session_id = ? ORDER BY generation DESC LIMIT 1").get(process.argv[2]);
+  if (!archive || !archive.archive_blob) process.exit(2);
+  const bytes = archive.encoding === "zstd" ? zstdDecompressSync(archive.archive_blob) : archive.archive_blob;
+  if (archive.encoding !== "zstd" && archive.encoding !== "identity") process.exit(2);
+  process.stdout.write(Buffer.from(bytes));
+}
+db.close();
+'''
+        proc = await command(
+            [self._node_path, "-e", script, str(database), session_id],
+            env={**os.environ, "NODE_NO_WARNINGS": "1"}, timeout=120,
         )
+        if proc.returncode != 0:
+            logger.warning("openclaw_cli: session export failed: %s", proc.stderr[-1000:])
+            return
+        destination.write_text(proc.stdout, encoding="utf-8")
 
     # =========================================================================
     # internals
@@ -1080,6 +1339,8 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         ``node.exe <…>\\node_modules\\openclaw\\openclaw.mjs`` directly when
         the .mjs entry can be located; otherwise fall back to the shim.
         """
+        if hasattr(self, "_node_path"):
+            return [self._node_path, self._openclaw_path]
         if self.executor.sandbox.is_linux:
             return [self._openclaw_path]
         node = self.executor.sandbox.node
@@ -1115,6 +1376,15 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         env = os.environ.copy()
         for k, v in (self.executor.env or {}).items():
             env[k] = v
+        env["OPENCLAW_STATE_DIR"] = str(self._state_dir)
+        env.pop("OPENCLAW_CONFIG_PATH", None)
+        env.pop("OPENCLAW_GATEWAY_URL", None)
+        env.pop("OPENCLAW_GATEWAY_PASSWORD", None)
+        if token := getattr(self, "_gateway_token", None):
+            env["OPENCLAW_GATEWAY_TOKEN"] = token
+        else:
+            env.pop("OPENCLAW_GATEWAY_TOKEN", None)
+        env.pop("OPENCLAW_GATEWAY_PORT", None)
         env["NO_COLOR"] = "1"
         # For a direct run, drop the OpenRouter key so its presence (always
         # exported by the secrets sidecar) cannot make openclaw fall back to
@@ -1155,6 +1425,64 @@ class OpenClawCliDeployer(BaseAgentDeployer):
     # =========================================================================
 
     @classmethod
+    def _parse_child_trajectories(cls, work_dir: Path, builder: TrajectoryBuilder):
+        children_dir = work_dir / "subagents"
+        index = children_dir / "index.json"
+        if not index.is_file():
+            return [], False
+        try:
+            records = json.loads(index.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("openclaw_cli: invalid subagent index")
+            return [], True
+        if not isinstance(records, list):
+            logger.warning("openclaw_cli: subagent index unavailable")
+            return [], True
+        trajectories = {}
+        incomplete = False
+        for record in records:
+            if (not isinstance(record, dict) or not isinstance(record.get("session_key"), str)
+                    or record["session_key"] in trajectories):
+                incomplete = True
+                continue
+            child = TrajectoryBuilder(
+                agent_name=builder.trajectory.agent.name,
+                agent_version=builder.trajectory.agent.version,
+                model=record.get("model") or builder.trajectory.agent.model,
+                task_path=builder.trajectory.task_path,
+                variant_index=builder.trajectory.variant_index,
+            )
+            child.trajectory.extra["openclaw_cli"] = {
+                key: record.get(key) for key in ("session_id", "session_key", "parent_session_key", "status", "provider")
+            }
+            transcript = record.get("transcript")
+            path = children_dir / Path(transcript).name if isinstance(transcript, str) else None
+            if path is None or not path.is_file():
+                incomplete = True
+                child.add_step(source="system", message="OpenClaw subagent transcript unavailable")
+            else:
+                persist_transcript_images(path, run_dir_for_artifacts(work_dir))
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        incomplete = True
+                        continue
+                    message = event.get("message", {}) if isinstance(event, dict) else {}
+                    if isinstance(message, dict) and message.get("role") == "assistant":
+                        if not record.get("model") and isinstance(message.get("model"), str) and message["model"]:
+                            record["model"] = child.trajectory.agent.model = message["model"]
+                        if not record.get("provider") and isinstance(message.get("provider"), str) and message["provider"]:
+                            record["provider"] = child.trajectory.extra["openclaw_cli"]["provider"] = message["provider"]
+                    cls._consume_session_event(event, child)
+            result = child.finalize(reward=None)
+            trajectories[record["session_key"]] = (record, result)
+        for record, trajectory in trajectories.values():
+            parent = trajectories.get(record.get("parent_session_key"))
+            (parent[1] if parent else builder.trajectory).subagent_trajectories.append(trajectory)
+        return [trajectory for _, trajectory in trajectories.values()], incomplete
+
+    @classmethod
     def parse_artifacts(
         cls,
         *,
@@ -1181,27 +1509,80 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     continue
                 cls._consume_session_event(event, builder)
 
-        # 2. Parse stderr JSON envelope
-        stderr_file = work_dir / "stderr.log"
-        if stderr_file.exists():
-            stderr_text = stderr_file.read_text(encoding="utf-8", errors="replace")
-            json_obj = _parse_stderr_json(stderr_text)
-            if json_obj:
-                builder.trajectory.extra.setdefault("openclaw_cli", {})["result_envelope"] = json_obj
-                meta = json_obj.get("meta", {})
-                agent_meta = meta.get("agentMeta", {})
-                usage = agent_meta.get("usage", {})
-                if usage:
-                    builder.trajectory.extra["openclaw_cli"]["usage"] = usage
-                    final_metrics = _usage_final_metrics(usage)
-                    if final_metrics:
-                        builder.override_final_metrics(**final_metrics)
+        children, child_incomplete = cls._parse_child_trajectories(work_dir, builder)
+
+        # 2. Parse the CLI result envelope.
+        json_obj = _result_from_logs(work_dir / "stdout.log", work_dir / "stderr.log")
+        usage: dict = {}
+        if json_obj:
+            builder.trajectory.extra.setdefault("openclaw_cli", {})["result_envelope"] = json_obj
+            meta = json_obj.get("meta", {})
+            agent_meta = meta.get("agentMeta", {})
+            usage = agent_meta.get("usage", {}) or {}
+            if usage:
+                builder.trajectory.extra["openclaw_cli"]["usage"] = usage
+        cost = usage.get("cost") if isinstance(usage, dict) else None
+        total_cost = cost.get("total") if isinstance(cost, dict) else None
+        if isinstance(total_cost, (int, float)) and not isinstance(total_cost, bool):
+            if children:
+                main_cost = sum(step.metrics.cost_usd or 0 for step in builder.trajectory.steps if step.metrics)
+                total_cost = max(total_cost, main_cost) + sum(
+                    child.final_metrics.total_cost_usd or 0 for child in children if child.final_metrics
+                )
+            builder.override_final_metrics(total_cost_usd=total_cost)
+        elif any(step.metrics and step.metrics.cost_usd is None for step in builder.trajectory.steps):
+            builder.mark_cost_unavailable()
+        elif not any(step.metrics for step in builder.trajectory.steps):
+            builder.mark_cost_unavailable()
+        elif children:
+            builder.override_final_metrics(total_cost_usd=sum(
+                step.metrics.cost_usd or 0 for step in builder.trajectory.steps if step.metrics
+            ) + sum(
+                child.final_metrics.total_cost_usd or 0 for child in children if child.final_metrics
+            ))
+        if child_incomplete or any(
+            not any(step.metrics for step in child.steps)
+            or any(step.metrics and step.metrics.cost_usd is None for step in child.steps)
+            for child in children
+        ):
+            builder.mark_cost_unavailable()
 
         image_usage = read_image_model_usage(work_dir / "vision-usage.jsonl")
+        final_metrics = _usage_final_metrics(usage)
+        if children:
+            for target, field in (
+                ("total_input_tokens", "input_tokens"),
+                ("total_output_tokens", "output_tokens"),
+                ("total_cache_read_tokens", "cache_read_tokens"),
+                ("total_cache_creation_tokens", "cache_creation_tokens"),
+            ):
+                parent_total = sum(getattr(step.metrics, field) or 0 for step in builder.trajectory.steps if step.metrics)
+                child_total = sum(getattr(child.final_metrics, target) for child in children if child.final_metrics)
+                final_metrics[target] = max(final_metrics.get(target, 0), parent_total) + child_total
         if image_usage:
             builder.trajectory.extra.setdefault("openclaw_cli", {})[
                 "image_model_usage"
             ] = image_usage
+            builder.add_step(
+                source="system", message="OpenClaw image model usage",
+                metrics=StepMetrics(
+                    input_tokens=image_usage["input_write_tokens"],
+                    output_tokens=image_usage["output_tokens"],
+                    cache_read_tokens=image_usage["cache_read_tokens"],
+                    cache_creation_tokens=image_usage["cache_creation_tokens"],
+                ),
+            )
+            for target, source in (
+                ("total_input_tokens", "input_write_tokens"),
+                ("total_output_tokens", "output_tokens"),
+                ("total_cache_read_tokens", "cache_read_tokens"),
+                ("total_cache_creation_tokens", "cache_creation_tokens"),
+            ):
+                if target in final_metrics:
+                    final_metrics[target] += image_usage[source]
+            builder.mark_cost_unavailable()
+        if final_metrics:
+            builder.override_final_metrics(**final_metrics)
 
         if not transcript_file.exists():
             builder.add_step(
@@ -1216,11 +1597,17 @@ class OpenClawCliDeployer(BaseAgentDeployer):
 
     @classmethod
     def _consume_session_event(cls, event: dict, builder: TrajectoryBuilder) -> None:
+        first_new_step = len(builder.trajectory.steps)
         etype = event.get("type")
         if etype == "message":
             cls._consume_message(event, builder)
         elif etype == "tool_result":
             cls._consume_tool_result(event, builder)
+        # OpenClaw transcripts are imported after the run. The builder's default
+        # timestamp is the import time, not when the action actually happened.
+        if timestamp := _session_event_timestamp(event):
+            for step in builder.trajectory.steps[first_new_step:]:
+                step.timestamp = timestamp
 
     @staticmethod
     def _consume_message(event: dict, builder: TrajectoryBuilder) -> None:
@@ -1401,6 +1788,27 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         )
 
 
+def _session_event_timestamp(event: dict) -> str | None:
+    """Return an event's actual UTC timestamp when the transcript provides one."""
+    message = event.get("message")
+    candidates = (event.get("timestamp"), message.get("timestamp") if isinstance(message, dict) else None)
+    for value in candidates:
+        try:
+            if isinstance(value, str):
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    continue
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                seconds = value / 1000 if abs(value) >= 100_000_000_000 else value
+                parsed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+            else:
+                continue
+            return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except (ValueError, OverflowError, OSError):
+            continue
+    return None
+
+
 def _parse_stderr_json(stderr: str) -> dict | None:
     """Find JSON envelope in openclaw --json stderr stream."""
     if not stderr:
@@ -1441,6 +1849,25 @@ def _parse_stderr_json(stderr: str) -> dict | None:
                         return json.loads(text[j:end + 1])
                     except json.JSONDecodeError:
                         return None
+    return None
+
+
+def _result_from_logs(*paths: Path) -> dict | None:
+    decoder = json.JSONDecoder()
+    for path in paths:
+        text = _read_text_tolerant(path)
+        index = 0
+        while (index := text.find("{", index)) >= 0:
+            try:
+                candidate, length = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                index += 1
+                continue
+            if isinstance(candidate, dict) and candidate.get("status") == "ok":
+                candidate = candidate.get("result")
+            if _is_result_envelope(candidate):
+                return candidate
+            index += length
     return None
 
 

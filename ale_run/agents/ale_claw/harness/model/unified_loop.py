@@ -29,6 +29,8 @@ from agent.types import AgentCapability, Messages
 
 from ._message_shapes import _image_url_block
 from .cache_policy import apply_openclaw_cache_markers
+from .model_config import model_generation_kwargs
+from .reasoning import reasoning_fields
 
 
 # Fallback call_id when a tool/computer call item arrives without an id/call_id.
@@ -269,8 +271,21 @@ def _append_assistant_role(
     """Convert a ``role: assistant`` item into a Chat Completions assistant
     message, lifting tool_use blocks into ``tool_calls``."""
     content = item.get("content", [])
+    fields = reasoning_fields(item)
+    pending = (
+        messages[-1]
+        if messages and messages[-1].get("role") == "assistant"
+        and messages[-1].get("content") is None
+        and not messages[-1].get("tool_calls")
+        and ("reasoning_content" in messages[-1] or "reasoning_details" in messages[-1])
+        else None
+    )
     if isinstance(content, str):
-        messages.append({"role": "assistant", "content": content})
+        if pending is not None:
+            pending["content"] = content
+            pending.update(fields)
+        else:
+            messages.append({"role": "assistant", "content": content, **fields})
     elif isinstance(content, list):
         text_parts = []
         tool_calls = []
@@ -294,19 +309,27 @@ def _append_assistant_role(
                 })
                 call_id_to_fn_name[c.get("id", FALLBACK_CALL_ID)] = c.get("name", "")
             elif ctype == "thinking":
-                # Thinking block — skip (not needed for replay)
-                pass
+                if "reasoning_content" in c:
+                    fields["reasoning_content"] = c["reasoning_content"]
+                elif c.get("thinking"):
+                    fields["reasoning_content"] = c["thinking"]
+                if "reasoning_details" in c:
+                    fields["reasoning_details"] = c["reasoning_details"]
         msg: Dict[str, Any] = {"role": "assistant"}
         msg["content"] = "\n".join(text_parts) if text_parts else None
         if tool_calls:
             msg["tool_calls"] = tool_calls
-        messages.append(msg)
+        msg.update(fields)
+        if pending is not None:
+            pending.update(msg)
+        else:
+            messages.append(msg)
     else:
         messages.append({"role": "assistant", "content": None})
 
 
 def _append_reasoning(item: Dict[str, Any], messages: List[Dict[str, Any]]) -> None:
-    """Convert a prior-turn ``reasoning`` item into an assistant text message."""
+    """Start an assistant turn carrying its structured reasoning."""
     summary = item.get("summary", [])
     text = ""
     if isinstance(summary, list):
@@ -316,8 +339,11 @@ def _append_reasoning(item: Dict[str, Any], messages: List[Dict[str, Any]]) -> N
                 break
     if not text:
         text = item.get("reasoning", "")
-    if text:
-        messages.append({"role": "assistant", "content": text})
+    fields = reasoning_fields(item)
+    if "reasoning_content" not in fields and text:
+        fields["reasoning_content"] = text
+    if fields:
+        messages.append({"role": "assistant", "content": None, **fields})
 
 
 def _append_function_call(
@@ -436,7 +462,23 @@ def _convert_input_to_messages(items: Messages) -> List[Dict[str, Any]]:
         elif item_type == "computer_call_output":
             _append_computer_call_output(item, messages)
 
-    return messages
+    ordered: List[Dict[str, Any]] = []
+    pending: set[str] = set()
+    deferred: List[Dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            pending.update(call["id"] for call in message["tool_calls"])
+        if pending and message.get("role") == "user":
+            deferred.append(message)
+            continue
+        ordered.append(message)
+        if message.get("role") == "tool":
+            pending.discard(message.get("tool_call_id"))
+            if not pending:
+                ordered.extend(deferred)
+                deferred = []
+    ordered.extend(deferred)
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -457,23 +499,17 @@ def _convert_response_to_output(response: Any) -> Dict[str, Any]:
     choice = response.choices[0]
     message = choice.message
 
-    # --- Extract reasoning (OpenRouter returns in reasoning_content) ---
-    reasoning_content = getattr(message, "reasoning_content", None)
-    provider_fields = getattr(message, "provider_specific_fields", None) or {}
-    reasoning_details = provider_fields.get("reasoning_details", [])
-
-    if reasoning_content:
+    # --- Extract reasoning, including encrypted and signed details ---
+    fields = reasoning_fields(message)
+    reasoning_content = fields.get("reasoning_content")
+    if fields:
         # Build reasoning item compatible with Responses API format
         reasoning_item: Dict[str, Any] = {
             "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": reasoning_content}],
+            "summary": ([{"type": "summary_text", "text": reasoning_content}]
+                        if reasoning_content else []),
+            **fields,
         }
-        # Preserve signature if available (for Anthropic replay)
-        if reasoning_details:
-            for rd in reasoning_details:
-                if isinstance(rd, dict) and rd.get("signature"):
-                    reasoning_item["signature"] = rd["signature"]
-                    break
         output_items.append(reasoning_item)
 
     # --- Extract text content ---
@@ -668,6 +704,7 @@ class UnifiedAgentConfig(AsyncAgentConfig):
             "tools": [click_tool],
             "stream": False,
             "max_tokens": 200,
+            **model_generation_kwargs(model, model, kwargs),
         }
         # Pass through api_key/api_base if provided
         for k in ("api_key", "api_base"):

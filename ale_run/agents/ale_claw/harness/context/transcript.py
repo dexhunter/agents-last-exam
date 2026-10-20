@@ -106,8 +106,9 @@ def _reasoning_assistant_block(item: dict[str, Any]) -> dict[str, Any] | None:
     """A thinking block from a ``reasoning`` output item, or None when empty."""
     thinking_text = _extract_reasoning_text(item)
     thinking_signature = _extract_reasoning_signature(item)
-    if thinking_text or thinking_signature is not None:
-        return _thinking_block(thinking_text, item.get("id"), thinking_signature)
+    fields = {key: item[key] for key in ("reasoning_content", "reasoning_details") if key in item}
+    if thinking_text or thinking_signature is not None or fields:
+        return {**_thinking_block(thinking_text, item.get("id"), thinking_signature), **fields}
     return None
 
 

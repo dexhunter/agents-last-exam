@@ -364,9 +364,10 @@ def run_dir_for_artifacts(work_dir: Path) -> Path:
 def stage_transcript_file_images(
     transcript_file: Path,
     work_dir: Path,
+    workspace: Path | None = None,
 ) -> None:
     """Copy image-tool file inputs into the gathered artifact directory."""
-    workspace = Path.home() / ".openclaw" / "workspace"
+    workspace = workspace or Path.home() / ".openclaw" / "workspace"
     path_map: dict[str, str] = {}
     changed = False
 

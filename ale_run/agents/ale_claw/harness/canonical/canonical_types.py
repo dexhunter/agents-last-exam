@@ -71,6 +71,8 @@ class ThinkingBlock(TypedDict):
     type: Literal["thinking"]
     thinking: str
     thinkingSignature: NotRequired[str]
+    reasoning_content: NotRequired[str]
+    reasoning_details: NotRequired[list[dict[str, Any]]]
 
 
 class CompactionSummaryBlock(TypedDict):

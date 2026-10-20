@@ -26,7 +26,7 @@ from agent.types import ToolError
 
 from .fs_backends import FilesystemRegistry, HostBackend, VMBackend
 from ..memory.memory import MemoryGetTool, MemorySearchTool, MemoryStore  # MemoryWriteTool retained in memory.py; intentionally not exposed to the main agent (write(target='host') covers journaling).
-from ..model.model_config import model_credentials
+from ..model.model_config import merge_helper_generation_kwargs, model_credentials, model_generation_kwargs
 from .computer_handler import OpenClawComputerHandler
 from ..subagent.subagent_registry import SubagentRegistry
 from ..subagent.subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
@@ -169,7 +169,9 @@ def build_tools(
     default_model: str | None = None,
     auxiliary_model: str | None = None,
     thinking_params: dict[str, Any] | None = None,
+    thinking_config: Any | None = None,
     gui_thinking_params: dict[str, Any] | None = None,
+    generation_kwargs: dict[str, Any] | None = None,
     disable_main_computer: bool = False,
     disable_delegate_gui: bool = False,
     gui_model: str | None = None,
@@ -247,7 +249,10 @@ def build_tools(
     analyze_image_tool = AnalyzeImageTool(
         session.interface,
         model=summary_model,
-        thinking_params=vision_thinking_params,
+        thinking_params=merge_helper_generation_kwargs(
+            model_generation_kwargs(default_model or summary_model or "", summary_model or default_model or "", generation_kwargs),
+            vision_thinking_params, override_thinking=True,
+        ) or None,
         **model_credentials(default_model or summary_model or "", summary_model or default_model or "", api_key, api_base),
     )
     fs_registry = FilesystemRegistry()
@@ -312,6 +317,8 @@ def build_tools(
             summary_model=summary_model or default_model or "",
             parent_session_dir=parent_session_dir,
             thinking_params=thinking_params,
+            thinking_config=thinking_config,
+            generation_kwargs=generation_kwargs,
             auxiliary_model=auxiliary_model,
             primary_model=default_model,
             api_key=api_key,
@@ -322,6 +329,7 @@ def build_tools(
             "session": session,
             "parent_session_dir": parent_session_dir,
             "thinking_params": gui_thinking_params,
+            "generation_kwargs": generation_kwargs,
             "memory_store": memory_store,
             "primary_model": default_model,
             "api_key": api_key,
