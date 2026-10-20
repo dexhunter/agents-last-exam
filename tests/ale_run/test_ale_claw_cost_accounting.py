@@ -208,6 +208,22 @@ def test_usage_survives_missing_main_and_child_transcripts(tmp_path: Path) -> No
     assert result.subagent_trajectories[0].final_metrics.total_cost_usd is None
 
 
+def test_child_missing_cost_is_unknown_even_with_zero_missing_counter(tmp_path: Path) -> None:
+    wd = _build_work_dir(tmp_path)
+    session = wd / "openclaw_sessions" / "sess0"
+    (session / "subagent-runs.jsonl").write_text(json.dumps({
+        "run_id": "sub1", "status": "complete", "usage": {
+            "input_tokens": 7, "output_tokens": 2, "missing_cost_calls": 0,
+        },
+    }))
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(wd, builder)
+    result = builder.finalize(reward=None)
+    assert result.extra["ale_claw"]["usage"]["child_cost_incomplete"]
+    assert result.final_metrics.total_cost_usd is None
+    assert result.subagent_trajectories[0].final_metrics.total_cost_usd is None
+
+
 def test_main_usage_marks_missing_cost_and_cache_without_guessing(tmp_path: Path) -> None:
     wd = _build_work_dir(tmp_path)
     second = wd / "trajectories" / "traj0" / "turn_001" / "0002_api_result.json"

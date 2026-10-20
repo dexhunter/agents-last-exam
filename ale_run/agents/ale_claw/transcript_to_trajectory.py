@@ -127,7 +127,11 @@ def parse_transcripts_into(work_dir: Path, builder: TrajectoryBuilder) -> None:
                 child_cost += cost
             if input_tokens or output_tokens:
                 child_cache_incomplete |= "missing_cache_calls" not in usage or bool(usage["missing_cache_calls"])
-                child_cost_incomplete |= "missing_cost_calls" not in usage or bool(usage["missing_cost_calls"])
+                child_cost_incomplete |= (
+                    not isinstance(cost, (int, float))
+                    or "missing_cost_calls" not in usage
+                    or bool(usage["missing_cost_calls"])
+                )
             child.override_final_metrics(
                 total_input_tokens=input_tokens, total_output_tokens=output_tokens,
                 total_cache_read_tokens=cache_read, total_cache_creation_tokens=cache_write,
