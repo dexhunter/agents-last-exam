@@ -43,4 +43,4 @@ config:
   # max_completion_tokens: 32768
 
   # Official package, pinned for reproducible sandbox installs.
-  cli_version: "@xai-official/grok@0.2.112"
+  cli_version: "@xai-official/grok@1.0.62"
