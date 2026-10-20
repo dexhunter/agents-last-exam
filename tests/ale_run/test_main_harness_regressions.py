@@ -3,10 +3,10 @@ import dataclasses
 import importlib
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,7 +15,6 @@ import pytest
 from ale_run.base_interface import AgentRunResult, TrajectoryBuilder
 from ale_run.orchestration.experiment_spec import AgentSpec
 from ale_run.orchestration.factory import build_config, resolve_agent
-
 
 HARNESSES = [
     ("pi_cli", "PiCli"),
@@ -39,7 +38,7 @@ def adapter(name, stem, tmp_path, **kwargs):
 
 
 def parse(name, stem, tmp_path, events, **kwargs):
-    module, deployer = adapter(name, stem, tmp_path, **kwargs)
+    _module, deployer = adapter(name, stem, tmp_path, **kwargs)
     filename = "transcript.jsonl" if name == "pi_cli" else "stdout.log"
     (tmp_path / filename).write_text("\n".join(json.dumps(event) for event in events))
     builder = TrajectoryBuilder(agent_name=name, task_path="audit/no-task", variant_index=0)
@@ -357,30 +356,18 @@ async def test_zcode_cached_ref_and_sha_are_resolved(tmp_path, monkeypatch):
 async def test_qwen_wrong_installed_version_is_replaced(tmp_path, monkeypatch):
     module, deployer = adapter("qwen_code", "QwenCode", tmp_path, api_key="audit-key")
     bootstrap = importlib.import_module("ale_run.agents._bootstrap")
+    bridge = tmp_path / "bridge/src/index.js"
+    bridge.parent.mkdir(parents=True)
+    bridge.touch()
+    deployer.executor.sandbox.mcp_server_dir = str(bridge.parent.parent)
     monkeypatch.setattr(bootstrap, "ensure_node_npm", AsyncMock(return_value=("node", "npm")))
     monkeypatch.setattr(bootstrap, "ensure_cua_mcp_server", AsyncMock())
-    monkeypatch.setattr(module, "shutil", SimpleNamespace(which=lambda name: "/mock/qwen"))
-    installed = AsyncMock()
-    monkeypatch.setattr(deployer, "_install_cli", installed)
-    if hasattr(module, "ensure_cli_node"):
-        monkeypatch.setattr(module, "ensure_cli_node", AsyncMock(return_value="node"))
-
-        async def command(argv, **kwargs):
-            version = "0.1.0" if installed.await_count == 0 else deployer.config.cli_version
-            return subprocess.CompletedProcess(argv, 0, version, "")
-
-        monkeypatch.setattr(module, "run_command", command)
-    else:
-        monkeypatch.setattr(
-            module,
-            "subprocess",
-            SimpleNamespace(
-                run=lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "0.1.0", ""),
-                TimeoutExpired=subprocess.TimeoutExpired,
-            ),
-        )
+    installed = AsyncMock(return_value=("private-node", "private-cli.js"))
+    monkeypatch.setattr(module, "install_cli", installed)
     await deployer.install()
-    installed.assert_awaited_once_with("npm", deployer.config.cli_version)
+    installed.assert_awaited_once_with("node", "npm", deployer.config.cli_version)
+    assert deployer._qwen_path == "private-cli.js"
+    assert deployer.actual_cli_version == deployer.config.cli_version
 
 
 @pytest.mark.asyncio
@@ -569,7 +556,8 @@ async def test_wait_process_background_ownership(mode, tmp_path):
         "while not Path(os.environ['AUDIT_CHILD_PID']).exists(): time.sleep(0.01)\n"
         + ("time.sleep(60)\n" if mode == "timeout" else f"sys.exit({int(mode == 'failure')})\n")
     )
-    proc = subprocess.Popen(
+    proc = await asyncio.to_thread(
+        subprocess.Popen,
         [sys.executable, "-c", source, str(fixture)],
         env={**os.environ, "AUDIT_CHILD_PID": str(child_file)},
         start_new_session=True,

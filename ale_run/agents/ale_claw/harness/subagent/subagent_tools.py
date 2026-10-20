@@ -6,9 +6,8 @@ Three tools are exposed to the main agent:
     immediately with ``{"status": "accepted", "run_id": ...}``; the final
     result is delivered later as a ``[Subagent Result]`` user message via
     ``OpenClawComputerAgent._drain_completions``.
-  - ``delegate_gui``: blocking vision-to-action relay driving the VM via the
-    ``run_gui_subagent`` loop. Returns the final summary
-    synchronously so the main agent can resume with fresh VM state.
+  - ``delegate_gui``: asynchronous vision-to-action relay driving the VM via
+    ``run_gui_subagent``. The result and screenshot are announced when done.
   - ``subagents``: ``list`` active/recent runs or ``kill`` a runaway general
     subagent via ``registry.kill_run``.
 
@@ -18,16 +17,12 @@ Reference:
 
 Design notes:
   * ``BaseTool.call()`` is synchronous. ``DelegateGeneralTool`` runs inside an
-    active asyncio event loop (the CUA agent awaits tool calls), so it
-    schedules a task with ``asyncio.get_running_loop().create_task`` and
-    returns immediately. ``DelegateGUITool`` needs to block until the relay
-    loop finishes, so it adopts the ``ThreadPoolExecutor + asyncio.run``
-    pattern from ``AnalyzeImageTool.call`` (``analyze_image.py:144-168``).
+    active asyncio event loop (the CUA agent awaits tool calls), so both
+    delegate tools schedule a task and return immediately.
   * All three tools degrade gracefully: ``DelegateGeneralTool`` returns a
     ``rejected`` payload when the registry refuses a spawn (concurrency cap);
-    ``DelegateGUITool`` returns ``{"status": "error", ...}`` when the relay
-    coroutine raises; ``SubagentsTool.kill`` reports ``noop``/``error`` for
-    terminal/unknown targets.
+    ``DelegateGUITool`` rejects concurrent GUI runs; ``SubagentsTool.kill``
+    reports ``noop``/``error`` for terminal/unknown targets.
 """
 
 from __future__ import annotations
@@ -40,6 +35,7 @@ from typing import Any
 from agent.tools.base import BaseTool, register_tool
 
 from ..memory.memory import MemoryStore
+from ..model.model_config import model_credentials
 from .subagent_general import DEFAULT_MAX_STEPS as GENERAL_DEFAULT_MAX_STEPS
 from .subagent_general import run_general_subagent
 from .subagent_gui import DEFAULT_MAX_STEPS as GUI_DEFAULT_MAX_STEPS
@@ -158,6 +154,9 @@ class DelegateGeneralTool(BaseTool):
         parent_session_dir: Path,
         thinking_params: dict[str, Any] | None = None,
         auxiliary_model: str | None = None,
+        primary_model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
@@ -168,6 +167,9 @@ class DelegateGeneralTool(BaseTool):
         self._parent_session_dir = Path(parent_session_dir)
         self._thinking_params = thinking_params
         self._auxiliary_model = auxiliary_model
+        self._primary_model = primary_model or default_model
+        self._api_key = api_key
+        self._api_base = api_base
         super().__init__(cfg)
 
     @property
@@ -209,7 +211,7 @@ class DelegateGeneralTool(BaseTool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Optional absolute paths to PNG screenshots to "
+                        "Optional paths to screenshots saved by this run to "
                         "attach to the subagent's initial message as vision "
                         "input. Use this to delegate 'analyze this frame' "
                         "work."
@@ -246,6 +248,15 @@ class DelegateGeneralTool(BaseTool):
             if isinstance(screenshot_paths_raw, list)
             else None
         )
+        # Only screenshots produced by this run may be read on the host.
+        # Guest filesystem paths are handled by analyze_image via the session.
+        if screenshot_paths:
+            roots = (self._parent_session_dir.resolve(),
+                     (self._parent_session_dir.parent.parent / "trajectories").resolve())
+            screenshot_paths = [
+                path for path in screenshot_paths
+                if any(Path(path).resolve().is_relative_to(root) for root in roots)
+            ]
 
         try:
             run = self._registry.register(
@@ -272,6 +283,8 @@ class DelegateGeneralTool(BaseTool):
             max_steps=max_steps,
             thinking_params=self._thinking_params,
             initial_screenshot_paths=screenshot_paths,
+            credentials=model_credentials(self._primary_model, model, self._api_key, self._api_base),
+            summary_credentials=model_credentials(self._primary_model, self._summary_model, self._api_key, self._api_base),
         )
 
         loop = asyncio.get_running_loop()
@@ -306,6 +319,9 @@ class DelegateGUITool(BaseTool):
         thinking_params: dict[str, Any] | None = None,
         memory_store: MemoryStore | None = None,
         auxiliary_model: str | None = None,
+        primary_model: str | None = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
@@ -315,6 +331,9 @@ class DelegateGUITool(BaseTool):
         self._thinking_params = thinking_params
         self._memory_store = memory_store
         self._auxiliary_model = auxiliary_model
+        self._primary_model = primary_model or default_model
+        self._api_key = api_key
+        self._api_base = api_base
         super().__init__(cfg)
 
     @property
@@ -377,6 +396,12 @@ class DelegateGUITool(BaseTool):
         max_steps = int(params_dict.get("max_steps", GUI_DEFAULT_MAX_STEPS))
         label = params_dict.get("label", "") or ""
 
+        if any(
+            run.type == SubagentType.GUI and run.status in _ACTIVE_STATUSES
+            for run in self._registry.list_runs()
+        ):
+            return {"status": "rejected", "reason": "a GUI subagent is already using the desktop"}
+
         run = self._registry.register(
             type=SubagentType.GUI,
             task=instruction,
@@ -396,6 +421,7 @@ class DelegateGUITool(BaseTool):
                     thinking_params=self._thinking_params,
                     parent_session_dir=self._parent_session_dir,
                     memory_store=self._memory_store,
+                    credentials=model_credentials(self._primary_model, model, self._api_key, self._api_base),
                 )
                 # run_gui_subagent already calls registry.complete()
             except Exception as e:
@@ -653,5 +679,3 @@ class SubagentsTool(BaseTool):
 
         inbox.put_nowait(message)
         return {"status": "ok", "steered": run.run_id}
-
-

@@ -37,5 +37,5 @@ class GrokBuildConfig:
     otel_enabled: bool = True
     """Capture Grok Build's native external OpenTelemetry stream run-locally."""
 
-    cli_version: str = "@xai-official/grok@0.2.112"
+    cli_version: str = "@xai-official/grok@1.0.62"
     """Pinned official npm package installed dynamically when missing or stale."""

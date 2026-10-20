@@ -136,7 +136,7 @@ class FinalMetrics(BaseModel):
     total_output_tokens: int = 0
     total_cache_read_tokens: int = 0
     total_cache_creation_tokens: int = 0
-    total_cost_usd: float = 0.0
+    total_cost_usd: float | None = 0.0
     total_duration_ms: int = 0
     reward: float | None = None
     status: Literal["completed", "timeout", "failed"] = "completed"
@@ -256,6 +256,7 @@ class TrajectoryBuilder:
         self._next_step_id = 1
         self._t0 = time.monotonic()
         self._final_metrics_override: dict[str, float] = {}
+        self._cost_unavailable = False
 
     #: FinalMetrics fields a deployer may override in :meth:`finalize`.
     _OVERRIDABLE_METRICS = frozenset({
@@ -287,6 +288,10 @@ class TrajectoryBuilder:
                 raise ValueError(f"non-overridable FinalMetrics field: {key!r}")
             if value is not None:
                 self._final_metrics_override[key] = value
+
+    def mark_cost_unavailable(self) -> None:
+        """Mark the episode's total cost unknown or incomplete."""
+        self._cost_unavailable = True
 
     def add_step(
         self,
@@ -333,11 +338,13 @@ class TrajectoryBuilder:
             m.total_cache_read_tokens += s.metrics.cache_read_tokens or 0
             m.total_cache_creation_tokens += s.metrics.cache_creation_tokens or 0
             if s.metrics.cost_usd is not None:
-                m.total_cost_usd += s.metrics.cost_usd
+                m.total_cost_usd = (m.total_cost_usd or 0.0) + s.metrics.cost_usd
         # Authoritative deployer-supplied totals win over the per-step sum,
         # per provided key (see :meth:`override_final_metrics`).
         for key, value in self._final_metrics_override.items():
             setattr(m, key, value)
+        if self._cost_unavailable:
+            m.total_cost_usd = None
         self._traj.final_metrics = m
         self._traj.ended_at = _now_iso()
         return self._traj

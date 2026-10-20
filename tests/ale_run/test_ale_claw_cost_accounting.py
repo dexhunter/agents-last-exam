@@ -151,3 +151,105 @@ def test_override_final_metrics_ignores_none_and_beats_step_sum() -> None:
     fm = builder.finalize(reward=None, status="completed").final_metrics
     assert fm.total_input_tokens == 999  # overridden
     assert fm.total_cost_usd == pytest.approx(0.01)  # untouched → from step sum
+
+
+def test_child_and_helper_usage_reconciled_without_double_counting(tmp_path: Path) -> None:
+    wd = _build_work_dir(tmp_path)
+    session = wd / "openclaw_sessions" / "sess0"
+    child = session / "subagents" / "sub1"
+    child.mkdir(parents=True)
+    (child / "transcript.jsonl").write_text("", encoding="utf-8")
+    records = [
+        {"run_id": "sub1", "status": "running", "usage": {}},
+        {"run_id": "sub1", "status": "killed", "usage": {
+            "input_tokens": 50, "output_tokens": 5,
+            "cache_read_input_tokens": 10, "cache_write_input_tokens": 5,
+            "cost_usd": 0.002, "missing_cache_calls": 0, "missing_cost_calls": 0,
+        }},
+    ]
+    (session / "subagent-runs.jsonl").write_text("\n".join(map(json.dumps, records)))
+    helpers = [
+        {"input_tokens": 40, "output_tokens": 4, "cache_read_input_tokens": 8,
+         "cache_write_input_tokens": 2, "cost_usd": 0.003},
+        {"input_tokens": 10, "output_tokens": 1, "cost_usd": None},
+    ]
+    (wd / "helper_usage.jsonl").write_text("\n".join(map(json.dumps, helpers)))
+
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(wd, builder)
+    result = builder.finalize(reward=None, status="failed")
+    metrics = result.final_metrics
+    usage = result.extra["ale_claw"]["usage"]
+    assert (metrics.total_input_tokens, metrics.total_output_tokens) == (400, 35)
+    assert (metrics.total_cache_read_tokens, metrics.total_cache_creation_tokens) == (118, 192)
+    assert metrics.total_cost_usd is None
+    assert usage["total_cost_usd"] == pytest.approx(0.01)
+    assert usage["uncached_input_tokens"] == 80
+    assert usage["unclassified_helper_input_tokens"] == 10
+    assert usage["helper_cache_incomplete"] and usage["helper_cost_incomplete"]
+    assert result.subagent_trajectories[0].final_metrics.total_input_tokens == 50
+
+
+def test_usage_survives_missing_main_and_child_transcripts(tmp_path: Path) -> None:
+    session = tmp_path / "openclaw_sessions" / "sess0"
+    _write(session / "state.json", {"total_tokens": {"input_tokens": 10, "output_tokens": 1}})
+    (session / "subagent-runs.jsonl").write_text(json.dumps({
+        "run_id": "sub1", "status": "error", "usage": {"input_tokens": 7, "output_tokens": 2},
+    }))
+    (tmp_path / "helper_usage.jsonl").write_text(json.dumps({"input_tokens": 3, "output_tokens": 1}))
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(tmp_path, builder)
+    result = builder.finalize(reward=None, status="failed")
+    assert result.final_metrics.total_input_tokens == 20
+    assert result.final_metrics.total_output_tokens == 4
+    assert result.final_metrics.total_cost_usd is None
+    assert result.extra["ale_claw"]["usage"]["child_cost_incomplete"]
+    assert result.subagent_trajectories[0].steps[0].source == "system"
+    assert result.subagent_trajectories[0].final_metrics.total_cost_usd is None
+
+
+def test_child_missing_cost_is_unknown_even_with_zero_missing_counter(tmp_path: Path) -> None:
+    wd = _build_work_dir(tmp_path)
+    session = wd / "openclaw_sessions" / "sess0"
+    (session / "subagent-runs.jsonl").write_text(json.dumps({
+        "run_id": "sub1", "status": "complete", "usage": {
+            "input_tokens": 7, "output_tokens": 2, "missing_cost_calls": 0,
+        },
+    }))
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(wd, builder)
+    result = builder.finalize(reward=None)
+    assert result.extra["ale_claw"]["usage"]["child_cost_incomplete"]
+    assert result.final_metrics.total_cost_usd is None
+    assert result.subagent_trajectories[0].final_metrics.total_cost_usd is None
+
+
+def test_main_usage_marks_missing_cost_and_cache_without_guessing(tmp_path: Path) -> None:
+    wd = _build_work_dir(tmp_path)
+    second = wd / "trajectories" / "traj0" / "turn_001" / "0002_api_result.json"
+    _write(second, {"result": {"usage": {"prompt_tokens": 200, "completion_tokens": 15}}})
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(wd, builder)
+    usage = builder.trajectory.extra["ale_claw"]["usage"]
+    assert usage["overall_input_tokens"] == 300
+    assert usage["uncached_input_tokens"] == 10
+    assert usage["unclassified_main_input_tokens"] == 200
+    assert usage["main_cache_incomplete"]
+    assert usage["main_cost_incomplete"]
+    assert usage["total_cost_usd"] == pytest.approx(0.001)
+    assert builder.finalize(reward=None).final_metrics.total_cost_usd is None
+
+
+def test_missing_helper_usage_is_exposed_in_trajectory(tmp_path: Path) -> None:
+    _write(tmp_path / "helper_usage.jsonl", {
+        "input_tokens": None, "output_tokens": None, "cost_usd": None,
+        "cache_read_input_tokens": None, "cache_write_input_tokens": None,
+    })
+    builder = TrajectoryBuilder(agent_name="ale_claw", task_path="t", variant_index=0)
+    parse_transcripts_into(tmp_path, builder)
+    usage = builder.trajectory.extra["ale_claw"]["usage"]
+    assert usage["helper_calls"] == 1
+    assert usage["helper_usage_incomplete"]
+    assert usage["helper_cache_incomplete"]
+    assert usage["helper_cost_incomplete"]
+    assert builder.finalize(reward=None).final_metrics.total_cost_usd is None

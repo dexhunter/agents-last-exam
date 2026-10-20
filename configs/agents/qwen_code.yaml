@@ -1,0 +1,10 @@
+# Official Qwen Code. See ale_run/agents/qwen_code/README.md.
+harness: qwen_code
+model: qwen3.8-max
+config:
+  cli_version: 0.25.3
+  base_url: https://maas.qwencloudapi.com/compatible-mode/v1
+  api_key: ${env:QWEN_API_KEY}
+  auth_type: openai
+  coordinate_space: pixel
+  telemetry_enabled: true

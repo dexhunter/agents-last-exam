@@ -3,8 +3,7 @@
 Covers:
   - Tool registration and schema validation
   - Input normalization (dedup, @ stripping, max cap)
-  - Path type detection (remote vs local)
-  - Image loading: remote VM, local filesystem, data URI, HTTP URL
+  - Image loading: VM filesystem, data URI, HTTP URL
   - Size enforcement (maxBytesMb)
   - VLM call forwarding and error handling
 """
@@ -20,7 +19,6 @@ from PIL import Image as _PILImage
 from ale_run.agents.ale_claw.harness.tools.analyze_image import (
     AnalyzeImageTool,
     _decode_data_uri,
-    _is_remote_path,
     _mime_from_extension,
 )
 from agent.tools.base import TOOL_REGISTRY
@@ -106,23 +104,6 @@ class TestRegistration:
 # ---------------------------------------------------------------------------
 # Path detection
 # ---------------------------------------------------------------------------
-
-
-class TestPathDetection:
-    def test_windows_backslash(self):
-        assert _is_remote_path(r"C:\Users\User\test.png") is True
-
-    def test_windows_drive_letter(self):
-        assert _is_remote_path("D:\\folder\\image.jpg") is True
-
-    def test_unc_path(self):
-        assert _is_remote_path("\\\\server\\share\\file.png") is True
-
-    def test_unix_path_not_remote(self):
-        assert _is_remote_path("/Users/local/file.png") is False
-
-    def test_relative_path_not_remote(self):
-        assert _is_remote_path("./relative/file.png") is False
 
 
 # ---------------------------------------------------------------------------
@@ -251,20 +232,17 @@ class TestRemoteImageLoading:
 # ---------------------------------------------------------------------------
 
 
-class TestLocalImageLoading:
-    def test_local_path_reads_file(self, tmp_path):
-        img_file = tmp_path / "test.png"
-        img_file.write_bytes(_REAL_PNG_BYTES)
-
+class TestGuestImageLoading:
+    @pytest.mark.parametrize("guest_path", ["/home/user/frame.png", r"C:\\Users\\User\\frame.png"])
+    def test_file_path_always_reads_guest(self, guest_path):
         tool = _make_tool()
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=_mock_vlm_response("A cat"))
-            result = tool.call({"image": str(img_file), "prompt": "What is this?"})
+        result = _run(tool._load_image(guest_path, None))
+        assert isinstance(result, tuple)
+        tool.interface.read_bytes.assert_awaited_once_with(guest_path)
 
-        assert "A cat" in result
-
-    def test_local_file_not_found(self):
+    def test_missing_guest_file(self):
         tool = _make_tool()
+        tool.interface.read_bytes = AsyncMock(side_effect=FileNotFoundError("not found"))
         result = tool.call({"image": "/nonexistent/path/test.png"})
         assert "Error" in result
         assert "not found" in result

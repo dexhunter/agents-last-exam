@@ -904,6 +904,7 @@ class TestBuildSystemPromptReport:
         class FakeFile:
             def __init__(self, name, content):
                 self.name = name
+                self.path = name
                 self.content = content
 
         prompt = "Instructions\nContent of AGENTS.md\nMore stuff"

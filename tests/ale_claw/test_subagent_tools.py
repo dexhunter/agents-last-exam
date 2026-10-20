@@ -304,14 +304,14 @@ class TestDelegateGeneralTool:
             ):
                 result = tool.call({
                     "task": "analyze",
-                    "screenshot_paths": ["/tmp/a.png", "/tmp/b.png"],
+                    "screenshot_paths": [str(tmp_path / "a.png"), str(tmp_path / "b.png"), "/etc/secret.png"],
                 })
 
             assert result["status"] == "accepted"
             await registry._tasks[result["run_id"]]
             assert spawned["kwargs"]["initial_screenshot_paths"] == [
-                "/tmp/a.png",
-                "/tmp/b.png",
+                str(tmp_path / "a.png"),
+                str(tmp_path / "b.png"),
             ]
 
         _run(_scenario())
@@ -335,12 +335,12 @@ class TestDelegateGeneralTool:
             ):
                 result = tool.call({
                     "task": "analyze",
-                    "screenshot_paths": ["/tmp/a.png", "", 42, None, "/tmp/b.png"],
+                    "screenshot_paths": [str(tmp_path / "a.png"), "", 42, None, str(tmp_path / "b.png")],
                 })
             await registry._tasks[result["run_id"]]
             assert spawned["kwargs"]["initial_screenshot_paths"] == [
-                "/tmp/a.png",
-                "/tmp/b.png",
+                str(tmp_path / "a.png"),
+                str(tmp_path / "b.png"),
             ]
 
         _run(_scenario())

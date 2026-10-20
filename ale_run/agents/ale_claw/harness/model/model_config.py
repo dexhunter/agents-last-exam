@@ -84,6 +84,21 @@ class ResolvedModel:
     context_window: int | None = None
 
 
+def model_credentials(
+    primary_model: str, target_model: str, api_key: str | None, api_base: str | None
+) -> dict[str, str]:
+    """Use explicit gateway credentials only for models on the same provider."""
+    def provider(model: str) -> str:
+        return model.split("/", 1)[0] if "/" in model else resolve_model(model).provider
+
+    primary_provider, target_provider = provider(primary_model), provider(target_model)
+    if primary_provider != target_provider or (
+        primary_provider == "unknown" and primary_model != target_model
+    ):
+        return {}
+    return {key: value for key, value in (("api_key", api_key), ("api_base", api_base)) if value is not None}
+
+
 # ---------------------------------------------------------------------------
 # Registry: ordered list of (compiled_regex, ModelConfig) — first match wins.
 # ---------------------------------------------------------------------------

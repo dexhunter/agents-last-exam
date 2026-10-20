@@ -40,7 +40,7 @@ def _run(coro):
 def _mock_iface() -> MagicMock:
     iface = MagicMock()
     iface.read_bytes = AsyncMock(return_value=b"")
-    iface.write_text = AsyncMock(return_value=None)
+    iface.write_bytes = AsyncMock(return_value=None)
     iface.create_dir = AsyncMock(return_value=None)
     return iface
 
@@ -197,7 +197,7 @@ class TestTargetDispatch:
         result = tool.call({"path": r"C:\f.txt", "content": "hi"})
         assert result["success"] is True
         assert result["target"] == "vm"
-        iface.write_text.assert_awaited_once_with(r"C:\f.txt", "hi", append=False)
+        iface.write_bytes.assert_awaited_once_with(r"C:\f.txt", b"hi", append=False)
 
     def test_explicit_target_vm(self, tmp_path):
         reg = _registry_with_both(tmp_path)
@@ -205,7 +205,7 @@ class TestTargetDispatch:
         tool = WriteFileTool(reg)
         result = tool.call({"target": "vm", "path": r"C:\f.txt", "content": "hi"})
         assert result["success"] is True
-        iface.write_text.assert_awaited_once_with(r"C:\f.txt", "hi", append=False)
+        iface.write_bytes.assert_awaited_once_with(r"C:\f.txt", b"hi", append=False)
 
     def test_target_host_writes_to_host(self, tmp_path):
         reg = _registry_with_both(tmp_path)
@@ -215,7 +215,7 @@ class TestTargetDispatch:
         assert result["target"] == "host"
         assert (tmp_path / "out.md").read_text() == "x"
         # VM iface should not have been touched.
-        reg.get("vm").interface.write_text.assert_not_awaited()
+        reg.get("vm").interface.write_bytes.assert_not_awaited()
 
     def test_unknown_target_rejected(self, tmp_path):
         reg = _registry_with_both(tmp_path)
