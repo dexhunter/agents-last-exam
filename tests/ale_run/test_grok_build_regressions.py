@@ -8,7 +8,7 @@ import pytest
 
 from ale_run.agents.grok_build.config import GrokBuildConfig
 from ale_run.agents.grok_build import deployer
-from ale_run.base_interface import TrajectoryBuilder
+from ale_run.base_interface import AgentRunResult, TrajectoryBuilder
 
 
 @pytest.mark.asyncio
@@ -92,3 +92,45 @@ def test_otel_does_not_replace_terminal_when_incomplete_or_wrong_session(tmp_pat
     call["session.id"] = "s1"
     (tmp_path / "telemetry_summary.json").write_text(json.dumps({"api_calls": [call, call]}))
     assert deployer.GrokBuildDeployer._later_otel_usage(tmp_path, terminal) is None
+
+
+@pytest.mark.parametrize("reported_cost", [None, 0.0, 0.25])
+def test_terminal_cost_distinguishes_unavailable_from_zero(tmp_path, reported_cost):
+    terminal = {
+        "type": "end", "sessionId": "s1", "num_turns": 1,
+        "usage": {"input_tokens": 10, "cache_read_input_tokens": 20, "output_tokens": 3},
+    }
+    if reported_cost is not None:
+        terminal["total_cost_usd"] = reported_cost
+    (tmp_path / "transcript.jsonl").write_text(json.dumps(terminal) + "\n")
+    builder = TrajectoryBuilder(agent_name="grok_build", task_path="demo", variant_index=0)
+    deployer.GrokBuildDeployer.parse_artifacts(
+        work_dir=tmp_path, config=GrokBuildConfig(),
+        run_result=AgentRunResult(status="completed", exit_code=0), builder=builder,
+    )
+    metrics = builder.finalize(reward=None).final_metrics
+    assert metrics.total_cost_usd == reported_cost
+    assert metrics.total_input_tokens == 10
+
+
+def test_later_otel_calls_make_terminal_cost_unavailable(tmp_path, monkeypatch):
+    terminal = {
+        "type": "end", "sessionId": "s1", "num_turns": 1,
+        "usage": {"input_tokens": 20, "cache_read_input_tokens": 80, "output_tokens": 10},
+        "total_cost_usd": 1.0,
+    }
+    (tmp_path / "transcript.jsonl").write_text(json.dumps(terminal) + "\n")
+    calls = [
+        {"session.id": "s1", "input_tokens": 100, "cache_read_tokens": 80, "output_tokens": 10}
+        for _ in range(2)
+    ]
+    (tmp_path / "telemetry_summary.json").write_text(json.dumps({"api_calls": calls}))
+    monkeypatch.setattr(deployer, "recover_otel_artifacts", lambda work_dir: None)
+    builder = TrajectoryBuilder(agent_name="grok_build", task_path="demo", variant_index=0)
+    deployer.GrokBuildDeployer.parse_artifacts(
+        work_dir=tmp_path, config=GrokBuildConfig(),
+        run_result=AgentRunResult(status="completed", exit_code=0), builder=builder,
+    )
+    metrics = builder.finalize(reward=None).final_metrics
+    assert metrics.total_cost_usd is None
+    assert (metrics.total_input_tokens, metrics.total_cache_read_tokens) == (40, 160)

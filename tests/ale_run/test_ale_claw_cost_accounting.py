@@ -182,7 +182,8 @@ def test_child_and_helper_usage_reconciled_without_double_counting(tmp_path: Pat
     usage = result.extra["ale_claw"]["usage"]
     assert (metrics.total_input_tokens, metrics.total_output_tokens) == (400, 35)
     assert (metrics.total_cache_read_tokens, metrics.total_cache_creation_tokens) == (118, 192)
-    assert metrics.total_cost_usd == pytest.approx(0.01)
+    assert metrics.total_cost_usd is None
+    assert usage["total_cost_usd"] == pytest.approx(0.01)
     assert usage["uncached_input_tokens"] == 80
     assert usage["unclassified_helper_input_tokens"] == 10
     assert usage["helper_cache_incomplete"] and usage["helper_cost_incomplete"]
@@ -201,8 +202,10 @@ def test_usage_survives_missing_main_and_child_transcripts(tmp_path: Path) -> No
     result = builder.finalize(reward=None, status="failed")
     assert result.final_metrics.total_input_tokens == 20
     assert result.final_metrics.total_output_tokens == 4
+    assert result.final_metrics.total_cost_usd is None
     assert result.extra["ale_claw"]["usage"]["child_cost_incomplete"]
     assert result.subagent_trajectories[0].steps[0].source == "system"
+    assert result.subagent_trajectories[0].final_metrics.total_cost_usd is None
 
 
 def test_main_usage_marks_missing_cost_and_cache_without_guessing(tmp_path: Path) -> None:
@@ -218,6 +221,7 @@ def test_main_usage_marks_missing_cost_and_cache_without_guessing(tmp_path: Path
     assert usage["main_cache_incomplete"]
     assert usage["main_cost_incomplete"]
     assert usage["total_cost_usd"] == pytest.approx(0.001)
+    assert builder.finalize(reward=None).final_metrics.total_cost_usd is None
 
 
 def test_missing_helper_usage_is_exposed_in_trajectory(tmp_path: Path) -> None:
@@ -232,3 +236,4 @@ def test_missing_helper_usage_is_exposed_in_trajectory(tmp_path: Path) -> None:
     assert usage["helper_usage_incomplete"]
     assert usage["helper_cache_incomplete"]
     assert usage["helper_cost_incomplete"]
+    assert builder.finalize(reward=None).final_metrics.total_cost_usd is None

@@ -133,6 +133,12 @@ def parse_transcripts_into(work_dir: Path, builder: TrajectoryBuilder) -> None:
                 total_cache_read_tokens=cache_read, total_cache_creation_tokens=cache_write,
                 total_cost_usd=cost if isinstance(cost, (int, float)) else None,
             )
+            if (input_tokens or output_tokens) and (
+                not isinstance(cost, (int, float))
+                or "missing_cost_calls" not in usage
+                or usage["missing_cost_calls"]
+            ):
+                child.mark_cost_unavailable()
             child.trajectory.extra["ale_claw"] = {"run_id": run_id, "status": record.get("status")}
             status = "completed" if record.get("status") == "complete" else "failed"
             builder.trajectory.subagent_trajectories.append(child.finalize(reward=None, status=status))
@@ -212,6 +218,10 @@ def _reconcile_final_metrics(
     fields are flagged in the trajectory's aggregate. No-op when no input
     token total is available, preserving the per-step sum for degraded runs.
     """
+    if any(aggregated.get(key) for key in (
+        "main_cost_incomplete", "child_cost_incomplete", "helper_cost_incomplete"
+    )):
+        builder.mark_cost_unavailable()
     if aggregated.get("overall_input_tokens", 0) <= 0:
         return
     builder.override_final_metrics(

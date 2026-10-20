@@ -104,7 +104,9 @@ an already-started VM shell process may continue on the guest.
 
 Usage includes main, delegated, and auxiliary model calls. The trajectory
 flags missing usage, cost, and cache data where the artifacts expose them;
-known costs may include LiteLLM's reported response cost.
+known costs may include LiteLLM's reported response cost. The final total cost
+is `null` if any call's cost is unavailable; known partial costs remain in the
+trajectory's usage details.
 
 Minimal direct usage looks like this:
 

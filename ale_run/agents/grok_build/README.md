@@ -57,7 +57,8 @@ recorded separately. Reported cost is persisted only when Grok Build supplies
 the complete `total_cost_usd` field. If run-local OpenTelemetry records more
 API calls than the terminal snapshot, the parser uses those per-call token
 counts and omits the incomplete terminal cost; the raw snapshot remains in
-the transcript.
+the transcript. The final total cost is `null` when a complete cost is not
+available; it is not an estimate of zero.
 
 ## Telemetry
 

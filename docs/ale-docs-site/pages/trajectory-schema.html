@@ -169,7 +169,8 @@
     <h2 id="finalmetrics">FinalMetrics</h2>
     <p>
       Trajectory-wide totals plus the outcome. The token, cost, and duration
-      totals are summed from per-step <code>StepMetrics</code>;
+      totals are normally summed from per-step <code>StepMetrics</code>, and
+      agent deployers may supply authoritative totals;
       <code>reward</code> and <code>status</code> are <strong>not</strong> rolled
       up from steps. They are filled in by the grader and the runner at the end.
     </p>
@@ -181,7 +182,7 @@
         <tr><td><code>total_output_tokens</code></td><td><code>integer</code></td><td>no</td><td>Sum of step output tokens.</td></tr>
         <tr><td><code>total_cache_read_tokens</code></td><td><code>integer</code></td><td>no</td><td>Sum of cache reads.</td></tr>
         <tr><td><code>total_cache_creation_tokens</code></td><td><code>integer</code></td><td>no</td><td>Sum of cache writes.</td></tr>
-        <tr><td><code>total_cost_usd</code></td><td><code>float</code></td><td>no</td><td>Sum of step costs. Default <code>0.0</code>.</td></tr>
+        <tr><td><code>total_cost_usd</code></td><td><code>float</code> | null</td><td>no</td><td>Total cost, or <code>null</code> when unavailable or incomplete. Default <code>0.0</code>.</td></tr>
         <tr><td><code>total_duration_ms</code></td><td><code>integer</code></td><td>no</td><td>Total wall-clock.</td></tr>
         <tr><td><code>reward</code></td><td><code>float</code> | null</td><td>no</td><td>The grader's score, set at evaluation. Not a step metric.</td></tr>
         <tr><td><code>status</code></td><td><code>"completed" | "timeout" | "failed"</code></td><td>no</td><td>How the run ended. Default <code>"completed"</code>.</td></tr>

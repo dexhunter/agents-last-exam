@@ -738,6 +738,15 @@ class GrokBuildDeployer(BaseAgentDeployer):
             logger.warning("grok_build: OTel recovery failed: %s", exc)
 
         otel_usage = cls._later_otel_usage(work_dir, usage_source)
+        reported_cost = usage_source.get("total_cost_usd")
+        if (
+            otel_usage
+            or not isinstance(reported_cost, (int, float))
+            or isinstance(reported_cost, bool)
+        ):
+            builder.mark_cost_unavailable()
+        else:
+            builder.override_final_metrics(total_cost_usd=reported_cost)
         # A terminal cost snapshot is incomplete when later calls exist.
         cls._apply_usage(
             {**usage_source, **({"total_cost_usd": None} if otel_usage else {})}, builder
