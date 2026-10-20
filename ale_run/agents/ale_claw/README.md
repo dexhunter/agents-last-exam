@@ -46,6 +46,12 @@ Out of the box, the harness supports:
 
 > Note: `web_search` is disabled by default because it needs `BRAVE_API_KEY`.
 
+The agent runs on the host and uses one `RemoteDesktopSession` for Linux and
+Windows VM files, commands, and desktop actions. No VM or GUI MCP bridge is
+started by ALE Claw. File paths passed to `analyze_image` refer to the VM;
+optional `target: host` file operations are restricted to the configured host
+workspace.
+
 ## Running it
 
 Use `harness: ale_claw` in an ALE agent config:
@@ -83,7 +89,22 @@ The full config surface lives in `config.py`, but most users only need these:
 - `max_turns`: hard cap on the action loop
 - `thinking_level`: base reasoning level
 - `disabled_tools`: tools to hide from the model
-<!-- - `summary_model` / `auxiliary_model` / `gui_model`: helper models -->
+- `summary_model` / `auxiliary_model` / `gui_model`: optional helper models;
+  GUI delegation defaults to the auxiliary model or the main model
+
+The last permitted turn's tools run before the budget is checked. A run that
+reaches the limit without the `DONE` signal is marked failed. Explicit gateway
+credentials are passed to helper models only when they use the same provider.
+Screenshots, tool failures, and delegated sessions are included in the
+standard trajectory when their source artifacts are available.
+GUI delegation owns the desktop until it finishes; concurrent GUI delegation
+and direct desktop actions are rejected during that time. The run cancels
+active subagents when it ends. Cancellation stops the client-side RPC wait;
+an already-started VM shell process may continue on the guest.
+
+Usage includes main, delegated, and auxiliary model calls. The trajectory
+flags missing usage, cost, and cache data where the artifacts expose them;
+known costs may include LiteLLM's reported response cost.
 
 Minimal direct usage looks like this:
 

@@ -48,7 +48,7 @@ _BOOTSTRAP_TAIL_RATIO = 0.2
 def _os_display_label(target_os: str | None) -> str | None:
     """Map a sandbox OS string to a display label for the identity line.
 
-    Accepts the same loose values as ``MCPComputerHandler`` (``sb.os``):
+    Accepts common sandbox OS names (``sb.os``):
     ``"windows"``/``"win..."``, ``"mac"``/``"darwin"``, ``"linux"``/etc.
     Returns ``None`` when the OS is unknown, so callers fall back to the
     generic wording rather than asserting a platform.

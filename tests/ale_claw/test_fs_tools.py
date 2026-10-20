@@ -71,7 +71,7 @@ def _make_interface(
         iface.read_bytes = AsyncMock(side_effect=read_bytes)
     else:
         iface.read_bytes = AsyncMock(return_value=read_bytes or b"")
-    iface.write_text = AsyncMock(return_value=None if write_text_ok else Exception("write failed"))
+    iface.write_bytes = AsyncMock(return_value=None if write_text_ok else Exception("write failed"))
     iface.create_dir = AsyncMock(return_value=None if create_dir_ok else Exception("mkdir failed"))
     return iface
 
@@ -399,13 +399,13 @@ class TestWrite:
         assert result["success"] is True
         assert result["bytes_written"] == 5
         assert result["append"] is False
-        iface.write_text.assert_awaited_once_with(r"C:\out.txt", "hello", append=False)
+        iface.write_bytes.assert_awaited_once_with(r"C:\out.txt", b"hello", append=False)
 
     def test_append_mode(self):
         iface = _make_interface()
         tool = _write_tool(iface)
         tool.call({"path": r"C:\log.txt", "content": "entry\n", "append": True})
-        iface.write_text.assert_awaited_once_with(r"C:\log.txt", "entry\n", append=True)
+        iface.write_bytes.assert_awaited_once_with(r"C:\log.txt", b"entry\n", append=True)
 
     def test_create_parents_default_true(self):
         iface = _make_interface()
@@ -443,7 +443,7 @@ class TestWrite:
         )
         assert result["success"] is False
         assert "outside the task workspace" in result["error"]
-        iface.write_text.assert_not_awaited()
+        iface.write_bytes.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -464,8 +464,8 @@ class TestEdit:
         )
         assert result["success"] is True
         assert result["edits_applied"] == 1
-        iface.write_text.assert_awaited_once_with(
-            r"C:\f.txt", "hello there\n", append=False
+        iface.write_bytes.assert_awaited_once_with(
+            r"C:\f.txt", b"hello there\n", append=False
         )
 
     def test_multi_edit_sequential(self):
@@ -483,8 +483,8 @@ class TestEdit:
         )
         assert result["success"] is True
         assert result["edits_applied"] == 2
-        final = iface.write_text.await_args.args[1]
-        assert final == "APPLE\nbeta\nGRAPE\n"
+        final = iface.write_bytes.await_args.args[1]
+        assert final == b"APPLE\nbeta\nGRAPE\n"
 
     def test_deletion_via_empty_new_text(self):
         original = "keep me DELETEME stay"
@@ -496,8 +496,8 @@ class TestEdit:
                 "edits": [{"oldText": " DELETEME", "newText": ""}],
             }
         )
-        final = iface.write_text.await_args.args[1]
-        assert final == "keep me stay"
+        final = iface.write_bytes.await_args.args[1]
+        assert final == b"keep me stay"
 
     def test_mismatch_hint(self):
         original = "actual content here\n"
@@ -512,7 +512,7 @@ class TestEdit:
         assert result["success"] is False
         assert "could not find the exact text" in result["error"]
         assert "actual content here" in result["error"]
-        iface.write_text.assert_not_awaited()
+        iface.write_bytes.assert_not_awaited()
 
     def test_mismatch_hint_truncation(self):
         big = ("x" * 1000) + "\n"
@@ -584,7 +584,7 @@ class TestEdit:
         )
         assert result["success"] is True
         assert result.get("unchanged") is True
-        iface.write_text.assert_not_awaited()
+        iface.write_bytes.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .model_config import ResolvedModel, resolve_model
+from .usage import record_helper_usage
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ async def call_helper_model(
         if tools:
             kwargs["tools"] = [_to_responses_function_tool(tool) for tool in tools]
         response = await litellm.aresponses(**kwargs)
+        record_helper_usage(response, model=resolved.model, purpose=purpose)
         payload = response.model_dump()
         return HelperCallResult(
             text=_extract_responses_text(payload.get("output", [])),
@@ -72,6 +74,7 @@ async def call_helper_model(
     if tools:
         kwargs["tools"] = tools
     response = await litellm.acompletion(**kwargs)
+    record_helper_usage(response, model=resolved.model, purpose=purpose)
     choice = response.choices[0]
     return HelperCallResult(
         text=(choice.message.content or "").strip(),

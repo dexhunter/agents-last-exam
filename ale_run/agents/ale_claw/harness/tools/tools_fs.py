@@ -36,7 +36,7 @@ from typing import Any, Optional, Union
 from agent.tools.base import BaseTool, register_tool
 
 from ._paths import _parent_dir
-from ._tool_utils import _get_required_str, _run_tool_execute
+from ._tool_utils import _get_required_str, _run_async, _run_tool_execute
 from .fs_backends import FilesystemBackend, FilesystemRegistry
 from ..model.image_sanitization import (
     DEFAULT_LIMITS as _IMAGE_DEFAULT_LIMITS,
@@ -182,7 +182,7 @@ class ReadFileTool(BaseTool):
                     "type": "string",
                     "description": (
                         "Path on the chosen target. For 'vm', an absolute "
-                        "Windows path. For 'host', a path under the host "
+                        "Linux or Windows path. For 'host', a path under the host "
                         "workspace (absolute or relative to the host root)."
                     ),
                 },
@@ -207,6 +207,9 @@ class ReadFileTool(BaseTool):
         }
 
     def call(self, params: Union[str, dict], **kwargs) -> dict:
+        return _run_async(self.acall(params))
+
+    async def acall(self, params: Union[str, dict]) -> dict:
         try:
             parsed = self._verify_json_format_args(params)
             path = _get_required_str(parsed, "path", "read")
@@ -219,7 +222,7 @@ class ReadFileTool(BaseTool):
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
-        return _run_tool_execute(
+        return await _run_tool_execute(
             self._execute(parsed, backend, resolved),
             logger,
             f"read tool failure on {path}",
@@ -431,7 +434,7 @@ class WriteFileTool(BaseTool):
                     "type": "string",
                     "description": (
                         "Path on the chosen target. For 'vm', an absolute "
-                        "Windows path. For 'host', a path under the host "
+                        "Linux or Windows path. For 'host', a path under the host "
                         "workspace (absolute or relative to the host root)."
                     ),
                 },
@@ -455,6 +458,9 @@ class WriteFileTool(BaseTool):
         }
 
     def call(self, params: Union[str, dict], **kwargs) -> dict:
+        return _run_async(self.acall(params))
+
+    async def acall(self, params: Union[str, dict]) -> dict:
         try:
             parsed = self._verify_json_format_args(params)
             path = _get_required_str(parsed, "path", "write")
@@ -469,7 +475,7 @@ class WriteFileTool(BaseTool):
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
-        return _run_tool_execute(
+        return await _run_tool_execute(
             self._execute(parsed, backend, resolved, target),
             logger,
             f"write tool failure on {path}",
@@ -552,7 +558,7 @@ class EditFileTool(BaseTool):
                     "type": "string",
                     "description": (
                         "Path on the chosen target. For 'vm', an absolute "
-                        "Windows path. For 'host', a path under the host "
+                        "Linux or Windows path. For 'host', a path under the host "
                         "workspace (absolute or relative to the host root)."
                     ),
                 },
@@ -576,6 +582,9 @@ class EditFileTool(BaseTool):
         }
 
     def call(self, params: Union[str, dict], **kwargs) -> dict:
+        return _run_async(self.acall(params))
+
+    async def acall(self, params: Union[str, dict]) -> dict:
         try:
             parsed = self._verify_json_format_args(params)
             path = _get_required_str(parsed, "path", "edit")
@@ -589,7 +598,7 @@ class EditFileTool(BaseTool):
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
-        return _run_tool_execute(
+        return await _run_tool_execute(
             self._execute(backend, resolved, edits, target),
             logger,
             f"edit tool failure on {path}",

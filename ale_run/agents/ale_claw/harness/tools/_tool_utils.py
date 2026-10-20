@@ -37,7 +37,7 @@ def _get_required_str(params: dict, key: str, tool_name: str) -> str:
     return value
 
 
-def _run_tool_execute(coro, logger: logging.Logger, error_context: str) -> dict:
+async def _run_tool_execute(coro, logger: logging.Logger, error_context: str) -> dict:
     """Run a tool's async ``_execute()`` coroutine, surfacing any exception as a
     ``{"success": False, "error": ...}`` tool-error dict.
 
@@ -45,7 +45,7 @@ def _run_tool_execute(coro, logger: logging.Logger, error_context: str) -> dict:
     ``logger`` is the calling module's logger so records keep their origin.
     """
     try:
-        return _run_async(coro)
+        return await coro
     except Exception as e:  # noqa: BLE001 — surface RPC errors as tool errors
         logger.error("%s: %s", error_context, e)
         return {"success": False, "error": f"Error: {e}"}

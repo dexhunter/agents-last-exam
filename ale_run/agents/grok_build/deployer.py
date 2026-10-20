@@ -324,6 +324,9 @@ class GrokBuildDeployer(BaseAgentDeployer):
                     cwd=str(grok_cwd),
                     env=env,
                     start_new_session=hasattr(os, "setsid"),
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                    ),
                 )
             finally:
                 await asyncio.to_thread(stdout.close)
@@ -720,7 +723,6 @@ class GrokBuildDeployer(BaseAgentDeployer):
             cls._parse_stream(transcript_events, transcript_file, builder)
 
         usage_source = terminal_event if terminal_event.get("usage") else update_terminal
-        cls._apply_usage(usage_source, builder)
         try:
             recover_native_telemetry_artifacts(
                 work_dir,
@@ -734,6 +736,14 @@ class GrokBuildDeployer(BaseAgentDeployer):
             recover_otel_artifacts(work_dir)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("grok_build: OTel recovery failed: %s", exc)
+
+        otel_usage = cls._later_otel_usage(work_dir, usage_source)
+        # A terminal cost snapshot is incomplete when later calls exist.
+        cls._apply_usage(
+            {**usage_source, **({"total_cost_usd": None} if otel_usage else {})}, builder
+        )
+        if otel_usage:
+            cls._apply_usage({"usage": otel_usage}, builder)
 
         metadata = {
             "exit_code": run_result.exit_code,
@@ -753,6 +763,7 @@ class GrokBuildDeployer(BaseAgentDeployer):
             "num_turns": terminal_event.get("num_turns") or update_terminal.get("numTurns"),
             "model_usage": terminal_event.get("modelUsage")
             or (update_terminal.get("usage") or {}).get("modelUsage"),
+            "usage_source": "otel_api_requests" if otel_usage else "terminal",
         }
         builder.trajectory.extra.setdefault("grok_build", {}).update(metadata)
 
@@ -830,6 +841,26 @@ class GrokBuildDeployer(BaseAgentDeployer):
                         ]
                     ),
                 )
+                added = True
+                continue
+            if event_type == "user":
+                content = cls._content_parts(event.get("content"))
+                images = [part for part in content if part.type == "image"]
+                if not images:
+                    continue
+                last = builder.trajectory.steps[-1] if builder.trajectory.steps else None
+                extracted = any(
+                    part.type == "text"
+                    and "[Image extracted from tool result above]" in (part.text or "")
+                    for part in content
+                )
+                if extracted and last and last.observation and last.observation.results:
+                    existing = last.observation.results[-1].content
+                    for image in images:
+                        if image not in existing:
+                            existing.append(image)
+                else:
+                    builder.add_step(source="user", message=content)
                 added = True
         if pending_reasoning:
             builder.add_step(
@@ -977,6 +1008,18 @@ class GrokBuildDeployer(BaseAgentDeployer):
                             ),
                         )
                     )
+                elif item_type in {"image", "image_url"}:
+                    url = item.get("url") or item.get("image_url")
+                    if isinstance(url, dict):
+                        url = url.get("url")
+                    if isinstance(url, str) and url.startswith("data:image/"):
+                        parts.extend(
+                            part for part in cls._content_parts(url) if part.type == "image"
+                        )
+                    elif isinstance(url, str) and url.startswith(("https://", "http://")):
+                        parts.append(
+                            ContentPart(type="image", image=ImageSource(type="url", url=url))
+                        )
             return parts
         if not isinstance(content, str):
             return [
@@ -1007,6 +1050,45 @@ class GrokBuildDeployer(BaseAgentDeployer):
         if tail:
             parts.append(ContentPart(type="text", text=tail))
         return parts or [ContentPart(type="text", text=content)]
+
+    @staticmethod
+    def _later_otel_usage(work_dir: Path, terminal: dict[str, Any]) -> dict[str, int] | None:
+        """Recover later API calls only when telemetry exceeds a terminal snapshot."""
+        try:
+            summary = json.loads((work_dir / "telemetry_summary.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        calls = summary.get("api_calls") or []
+        count = terminal.get("num_turns") or terminal.get("numTurns")
+        if not isinstance(count, int) or len(calls) <= count:
+            return None
+        fields = ("input_tokens", "output_tokens", "cache_read_tokens")
+        if any(
+            not isinstance(call, dict) or any(not isinstance(call.get(k), int) for k in fields)
+            for call in calls
+        ):
+            return None
+        session_id = terminal.get("sessionId")
+        if session_id and any(call.get("session.id") != session_id for call in calls):
+            return None
+        full_input = sum(call["input_tokens"] for call in calls)
+        cached = sum(call["cache_read_tokens"] for call in calls)
+        output = sum(call["output_tokens"] for call in calls)
+        if cached > full_input:
+            return None
+        old = terminal.get("usage") or {}
+        prior_input = old.get("input_tokens")
+        prior_cached = old.get("cache_read_input_tokens")
+        prior_output = old.get("output_tokens")
+        if any(not isinstance(value, int) for value in (prior_input, prior_cached, prior_output)):
+            return None
+        if full_input - cached < prior_input or cached < prior_cached or output < prior_output:
+            return None
+        return {
+            "input_tokens": full_input - cached,
+            "cache_read_input_tokens": cached,
+            "output_tokens": output,
+        }
 
     @classmethod
     def _apply_usage(

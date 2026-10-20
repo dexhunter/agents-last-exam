@@ -1,7 +1,7 @@
 """
 Analyze Image Tool — VLM-based image analysis for the agent.
 
-Reads image(s) from remote VM, local filesystem, HTTP URLs, or data URIs,
+Reads image(s) from the VM, HTTP URLs, or data URIs,
 sends them to a vision model with a prompt, and returns text analysis.
 No raw images are added to the agent's context.
 
@@ -9,17 +9,14 @@ Design reference: openclaw/src/agents/tools/image-tool.ts
   - Core pattern: read image → base64 → send to VLM → return text
   - Multi-image support, data URI decoding, URL fetching
   - maxBytesMb safety cap
-  Adapted for CUA: dual-path (remote VM / local), litellm instead of pi-ai
+  Adapted for CUA: session-backed VM access, litellm instead of pi-ai
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import concurrent.futures
 import logging
 import re
-from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import litellm
@@ -27,6 +24,8 @@ import litellm
 from agent.tools.base import BaseTool, register_tool
 
 from ..model.image_sanitization import ImageLimits, sanitize_raw_image_bytes
+from ..model.usage import record_helper_usage
+from ._tool_utils import _run_async
 
 if TYPE_CHECKING:
     from computer.interface import BaseComputerInterface
@@ -59,23 +58,6 @@ def _mime_from_extension(path: str) -> str:
     return "image/png"
 
 
-def _is_remote_path(path: str) -> bool:
-    """Detect if the path is a Windows/remote path based on format.
-
-    Accepts either separator after the drive letter — ``C:\\foo`` and
-    ``C:/foo`` both count as Windows paths, since the remote VM normalises
-    slashes and agents frequently emit forward-slash form (easier to
-    escape in JSON tool-args).
-
-    Same heuristic as ``_paths._is_windows_path``.
-    """
-    return bool(
-        re.match(r"^[A-Za-z]:[\\/]", path)
-        or path.startswith("\\\\")
-        or "\\" in path
-    )
-
-
 def _decode_data_uri(uri: str) -> tuple[bytes, str]:
     """Decode a data:image/...;base64,... URI into (bytes, mime_type).
 
@@ -98,7 +80,7 @@ def _decode_data_uri(uri: str) -> tuple[bytes, str]:
 class AnalyzeImageTool(BaseTool):
     """Analyze image(s) with a vision model and return text analysis.
 
-    Supports remote VM paths (Windows), local filesystem paths (Unix),
+    Supports VM filesystem paths (Windows and Unix),
     HTTP(S) URLs, and data URIs. Returns text only — no raw images
     are added to the agent's context.
     """
@@ -108,11 +90,15 @@ class AnalyzeImageTool(BaseTool):
         interface: "BaseComputerInterface",
         model: str | None = None,
         thinking_params: Optional[dict[str, Any]] = None,
+        api_key: str | None = None,
+        api_base: str | None = None,
         cfg: Optional[dict] = None,
     ):
         self.interface = interface
         self.model = model or "anthropic/claude-sonnet-4-20250514"
         self.thinking_params = thinking_params or {}
+        self.api_key = api_key
+        self.api_base = api_base
         super().__init__(cfg)
 
     @property
@@ -151,24 +137,11 @@ class AnalyzeImageTool(BaseTool):
         }
 
     def call(self, params: Union[str, dict], **kwargs) -> Union[str, dict]:
-        """Execute image analysis (sync wrapper around async implementation)."""
-        params_dict = self._verify_json_format_args(params)
+        return _run_async(self.acall(params))
 
+    async def acall(self, params: Union[str, dict]) -> Union[str, dict]:
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run, self._execute(params_dict)
-                    )
-                    result = future.result()
-            else:
-                result = asyncio.run(self._execute(params_dict))
-            return result
+            return await self._execute(self._verify_json_format_args(params))
         except Exception as e:
             logger.error(f"Error in analyze_image: {e}")
             return f"Error: image analysis failed — {e}"
@@ -229,24 +202,14 @@ class AnalyzeImageTool(BaseTool):
                 image_bytes, mime_type = _decode_data_uri(image_ref)
             elif is_http_url:
                 image_bytes, mime_type = await self._fetch_http(image_ref)
-            elif _is_remote_path(image_ref):
-                image_bytes = await self.interface.read_bytes(image_ref)
-                mime_type = _mime_from_extension(image_ref)
             else:
-                # Local filesystem path
-                try:
-                    with open(image_ref, "rb") as f:
-                        image_bytes = f.read()
-                except FileNotFoundError:
-                    return f"Error: file not found: {image_ref}"
-                except OSError as e:
-                    return f"Error: could not read file: {image_ref} — {e}"
+                image_bytes = await self.interface.read_bytes(image_ref)
                 mime_type = _mime_from_extension(image_ref)
         except ValueError as e:
             # From _decode_data_uri
             return f"Error: invalid data URL — {e}"
         except Exception as e:
-            if _is_remote_path(image_ref):
+            if not is_data_uri and not is_http_url:
                 return f"Error: could not read file from remote VM: {image_ref} — {e}"
             return f"Error: failed to load image: {image_ref} — {e}"
 
@@ -342,7 +305,9 @@ class AnalyzeImageTool(BaseTool):
                 max_tokens=1024,
                 timeout=60,
                 **self.thinking_params,
+                **{k: v for k, v in {"api_key": self.api_key, "api_base": self.api_base}.items() if v is not None},
             )
+            record_helper_usage(response, model=self.model, purpose="vision")
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"VLM call failed: {e}")

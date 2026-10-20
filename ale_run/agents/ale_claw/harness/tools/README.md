@@ -8,8 +8,7 @@ runtime paths those actions use to reach the VM or local harness services.
 - **Typed tool surface:** the model acts through named tools rather than raw
   shell access alone.
 - **Tool categories:** file operations, shell, web, vision, memory, and GUI.
-- **Transport split:** tools can route through MCP or direct session-backed
-  handlers depending on config.
+- **Sandbox access:** VM tools use the remote desktop session.
 - **Computer handler:** GUI actions such as screenshots, clicks, typing, and
   scrolling are exposed through the `computer` tool.
 
@@ -33,5 +32,4 @@ can call.
 - `tools_web.py`: web tools
 - `analyze_image.py`: image-analysis tool
 - `computer_handler.py`: GUI action handling
-- `mcp_runtime.py`: MCP bridge runtime
 - `fs_backends.py`: filesystem backend routing

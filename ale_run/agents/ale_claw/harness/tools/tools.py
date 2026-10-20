@@ -21,16 +21,17 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from agent.callbacks.base import AsyncCallbackHandler
 from agent.computers.base import AsyncComputerHandler
-from agent.computers.cua import cuaComputerHandler
 from agent.tools.base import BaseTool
 from agent.types import ToolError
 
-from .fs_backends import FilesystemRegistry, HostBackend, MCPBackend, VMBackend
+from .fs_backends import FilesystemRegistry, HostBackend, VMBackend
 from ..memory.memory import MemoryGetTool, MemorySearchTool, MemoryStore  # MemoryWriteTool retained in memory.py; intentionally not exposed to the main agent (write(target='host') covers journaling).
+from ..model.model_config import model_credentials
+from .computer_handler import OpenClawComputerHandler
 from ..subagent.subagent_registry import SubagentRegistry
 from ..subagent.subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
-from .tools_shell import ExecTool, _MCPExecInterface
+from .tools_shell import ExecTool
 from .tools_web import WebFetchTool, WebSearchTool
 
 
@@ -69,12 +70,12 @@ class _RestrictedComputerHandler(AsyncComputerHandler):
 
     def __init__(self, cua_computer: Any) -> None:
         self._cua_computer = cua_computer
-        self._inner: cuaComputerHandler | None = None
+        self._inner: OpenClawComputerHandler | None = None
         self.interface: Any = None
 
     async def _ensure_init(self) -> None:
         if self._inner is None:
-            self._inner = cuaComputerHandler(self._cua_computer)
+            self._inner = OpenClawComputerHandler(self._cua_computer)
             await self._inner._initialize()
             self.interface = self._inner.interface
 
@@ -112,6 +113,15 @@ class _RestrictedComputerHandler(AsyncComputerHandler):
         await self._ensure_init()
         assert self._inner is not None
         return await self._inner.get_dimensions()
+
+    async def get_model_dimensions(self) -> tuple[int, int]:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.get_model_dimensions()
+
+    def set_screenshot_dimensions(self, width: int, height: int) -> None:
+        if self._inner is not None:
+            self._inner.set_screenshot_dimensions(width, height)
 
     async def get_current_url(self) -> str:
         await self._ensure_init()
@@ -167,7 +177,8 @@ def build_tools(
     host_workspace_root: str | None = None,
     context_window_tokens: int | None = None,
     computer_handler: Any = None,
-    mcp_runtime: Any = None,
+    api_key: str | None = None,
+    api_base: str | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
@@ -237,19 +248,10 @@ def build_tools(
         session.interface,
         model=summary_model,
         thinking_params=vision_thinking_params,
+        **model_credentials(default_model or summary_model or "", summary_model or default_model or "", api_key, api_base),
     )
-    # `vm` target: route through the vm MCP bridge when an MCPRuntime is supplied,
-    # else the legacy direct session RPC. Same `name="vm"` either way, so the
-    # tool vocabulary the model sees is identical.
     fs_registry = FilesystemRegistry()
-    if mcp_runtime is not None:
-        fs_registry.register(MCPBackend(
-            mcp_runtime,
-            workspace_root=workspace_root,
-            os_type=getattr(session, "os_type", None),
-        ))
-    else:
-        fs_registry.register(VMBackend(session.interface, workspace_root=workspace_root))
+    fs_registry.register(VMBackend(session.interface, workspace_root=workspace_root))
     if host_workspace_root:
         try:
             fs_registry.register(HostBackend(host_workspace_root))
@@ -267,10 +269,7 @@ def build_tools(
     )
     write_tool = WriteFileTool(fs_registry)
     edit_tool = EditFileTool(fs_registry)
-    exec_interface = (
-        _MCPExecInterface(mcp_runtime) if mcp_runtime is not None else session.interface
-    )
-    exec_tool = ExecTool(exec_interface, workspace_root=workspace_root)
+    exec_tool = ExecTool(session.interface, workspace_root=workspace_root)
     web_search = WebSearchTool()
     web_fetch = WebFetchTool()
     memory_search = MemorySearchTool(memory_store)
@@ -314,6 +313,9 @@ def build_tools(
             parent_session_dir=parent_session_dir,
             thinking_params=thinking_params,
             auxiliary_model=auxiliary_model,
+            primary_model=default_model,
+            api_key=api_key,
+            api_base=api_base,
         )
         gui_tool_kwargs: dict[str, Any] = {
             "registry": registry,
@@ -321,9 +323,11 @@ def build_tools(
             "parent_session_dir": parent_session_dir,
             "thinking_params": gui_thinking_params,
             "memory_store": memory_store,
+            "primary_model": default_model,
+            "api_key": api_key,
+            "api_base": api_base,
         }
-        if gui_model:
-            gui_tool_kwargs["default_model"] = gui_model
+        gui_tool_kwargs["default_model"] = gui_model or auxiliary_model or default_model or summary_model
         subagents_tool = SubagentsTool(registry=registry)
         if disable_delegate_gui:
             tools.extend([delegate_general, subagents_tool])

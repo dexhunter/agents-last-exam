@@ -1,0 +1,10 @@
+# Grok Build with Grok 4.7 via OpenRouter. Export OPENROUTER_API_KEY.
+harness: grok_build
+model: x-ai/grok-4.7
+config:
+  base_url: https://openrouter.ai/api/v1
+  api_backend: chat_completions
+  api_key_env: OPENROUTER_API_KEY
+  context_window: 500000
+  reasoning_effort: high
+  cli_version: "@xai-official/grok@1.0.62"

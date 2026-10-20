@@ -115,9 +115,7 @@ class TestBuildTools:
         session.interface = MagicMock()
         session._computer = object()
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool") as mock_analyze_image_tool, patch(
-            "ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"
-        ):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool") as mock_analyze_image_tool:
             store = MagicMock()
             build_tools(
                 session,
@@ -136,9 +134,7 @@ class TestBuildTools:
         session.interface = MagicMock()
         session._computer = object()
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool") as mock_analyze_image_tool, patch(
-            "ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"
-        ) as mock_milestone_tool:
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool") as mock_analyze_image_tool:
             store = MagicMock()
             build_tools(
                 session,
@@ -149,7 +145,6 @@ class TestBuildTools:
                 },
             )
 
-        mock_milestone_tool.assert_called_once_with(session.interface)
         mock_analyze_image_tool.assert_called_once_with(
             session.interface,
             model="anthropic/claude-sonnet-4-6-20260101",
@@ -162,7 +157,7 @@ class TestBuildTools:
         sentinel = object()
         session._computer = sentinel
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"), patch("ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"):
             tools = build_tools(
                 session,
                 MagicMock(),
@@ -180,7 +175,7 @@ class TestBuildTools:
         sentinel = object()
         session._computer = sentinel
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"), patch("ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"):
             tools = build_tools(
                 session,
                 MagicMock(),
@@ -189,13 +184,13 @@ class TestBuildTools:
             )
 
         assert sentinel not in tools
-        # Restricted computer + non-computer tools (milestone, analyze_image,
+        # Restricted computer + non-computer tools (analyze_image,
         # read, write, edit, exec, web_search, web_fetch, memory_search,
-        # memory_get = 11). memory_write is no longer exposed to the main
+        # memory_get = 10). memory_write is no longer exposed to the main
         # agent — superseded by write(target='host').
         from ale_run.agents.ale_claw.harness.tools.tools import _RestrictedComputerHandler
 
-        assert len(tools) == 11
+        assert len(tools) == 10
         assert isinstance(tools[0], _RestrictedComputerHandler)
 
     def test_disable_main_computer_pairs_with_delegate_gui(self):
@@ -209,7 +204,7 @@ class TestBuildTools:
         session._computer = object()
         registry = SubagentRegistry()
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"), patch("ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"):
             tools = build_tools(
                 session,
                 MagicMock(),
@@ -237,7 +232,7 @@ class TestBuildTools:
         session._computer = object()
         registry = SubagentRegistry()
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"), patch("ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"):
             tools = build_tools(
                 session,
                 MagicMock(),
@@ -262,7 +257,7 @@ class TestBuildTools:
         session._computer = sentinel
         registry = SubagentRegistry()
 
-        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"), patch("ale_run.agents.ale_claw.harness.tools.milestone.MilestoneTool"):
+        with patch("ale_run.agents.ale_claw.harness.tools.analyze_image.AnalyzeImageTool"):
             tools = build_tools(
                 session,
                 MagicMock(),

@@ -54,7 +54,10 @@ spooled across range chunks without exposing or truncating partial records.
 The final `end` event is the authoritative accounting source. Its
 `input_tokens` field is uncached input, while `cache_read_input_tokens` is
 recorded separately. Reported cost is persisted only when Grok Build supplies
-the complete `total_cost_usd` field.
+the complete `total_cost_usd` field. If run-local OpenTelemetry records more
+API calls than the terminal snapshot, the parser uses those per-call token
+counts and omits the incomplete terminal cost; the raw snapshot remains in
+the transcript.
 
 ## Telemetry
 
@@ -106,6 +109,8 @@ MCP image results are stored as data URLs in Grok's chat history or its
 run-local MCP spill files. The parser converts them to
 `ImageSource(type="base64")`; the framework then writes them under the standard
 `screenshots/` directory before serializing the trajectory.
+Images extracted into a subsequent user message are attached to the preceding
+tool result as well.
 
 ## Custom Models
 
@@ -130,6 +135,9 @@ root that exposes the selected wire protocol: `<base_url>/chat/completions`,
 `<base_url>/responses`, or `<base_url>/messages`. Custom gateways must emit that
 protocol exactly. For example, a Responses gateway that adds unknown SSE event
 types can be rejected by Grok Build's strict event decoder.
+
+For the tested OpenRouter configuration, see
+`configs/agents/grok_build_openrouter.yaml` and set `OPENROUTER_API_KEY`.
 
 `reasoning_effort` is passed as `--reasoning-effort`. Grok Build accepts the
 canonical levels `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`

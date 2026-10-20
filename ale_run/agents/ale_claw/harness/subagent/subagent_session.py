@@ -201,6 +201,8 @@ class GeneralSubagentSession:
         thinking_params: dict[str, Any] | None = None,
         summary_runtime: ResolvedModel | None = None,
         initial_screenshot_paths: list[str] | None = None,
+        credentials: dict[str, str] | None = None,
+        summary_credentials: dict[str, str] | None = None,
     ) -> None:
         self._run_id = run_id
         self._task = task
@@ -212,6 +214,8 @@ class GeneralSubagentSession:
         self._max_compactions = max_compactions
         self._thinking_params = thinking_params or {}
         self._summary_runtime = summary_runtime
+        self._credentials = credentials or {}
+        self._summary_credentials = summary_credentials or {}
 
         # Public counters / handles.
         self.usage = SubagentUsage()
@@ -326,16 +330,15 @@ class GeneralSubagentSession:
 
             # 4. Usage accumulation.
             resp_usage = getattr(response, "usage", None)
-            if resp_usage is not None:
-                self.usage.input_tokens += int(getattr(resp_usage, "prompt_tokens", 0) or 0)
-                self.usage.output_tokens += int(getattr(resp_usage, "completion_tokens", 0) or 0)
+            hidden = getattr(response, "_hidden_params", None) or {}
+            self.usage.add(resp_usage, hidden.get("response_cost"))
 
             choice = response.choices[0]
             assistant_content = choice.message.content or ""
             tool_calls = choice.message.tool_calls
 
             # 5. Append assistant message to transcript + in-memory list.
-            self._append_assistant(assistant_content, tool_calls)
+            self._append_assistant(assistant_content, tool_calls, resp_usage)
 
             # 6. Terminal: no tool calls => final text response.
             if not tool_calls:
@@ -343,7 +346,7 @@ class GeneralSubagentSession:
 
             # 7. Execute each tool call inline.
             for tc in tool_calls:
-                tool_result = self._execute_tool_call(tc)
+                tool_result = await self._execute_tool_call(tc)
                 self._append_tool_result(tc, tool_result)
 
         # Loop exhausted.
@@ -356,6 +359,7 @@ class GeneralSubagentSession:
             "messages": self._messages,
             "temperature": 1.0,
             **self._thinking_params,
+            **self._credentials,
         }
         if self._tool_schemas:
             kwargs["tools"] = self._tool_schemas
@@ -365,7 +369,7 @@ class GeneralSubagentSession:
     # Tool execution + transcript helpers
     # ------------------------------------------------------------------
 
-    def _execute_tool_call(self, tc: Any) -> str:
+    async def _execute_tool_call(self, tc: Any) -> str:
         """Run a single tool call inline and return its string result."""
         tool_name = tc.function.name
         tool_args = tc.function.arguments
@@ -374,7 +378,10 @@ class GeneralSubagentSession:
         if tool is None:
             return f"Error: tool '{tool_name}' is not available to this subagent."
         try:
-            result = tool.call(tool_args)
+            if callable(getattr(tool, "acall", None)):
+                result = await tool.acall(tool_args)
+            else:
+                result = await asyncio.to_thread(tool.call, tool_args)
             if not isinstance(result, str):
                 result = _json.dumps(result)
             return result
@@ -385,6 +392,7 @@ class GeneralSubagentSession:
         self,
         text: str,
         tool_calls: list[Any] | None,
+        response_usage: Any = None,
     ) -> None:
         """Append assistant turn to in-memory messages + transcript."""
         # In-memory chat-completions message (kept verbatim for litellm).
@@ -420,11 +428,10 @@ class GeneralSubagentSession:
         if not blocks:
             blocks = [{"type": "text", "text": ""}]
 
-        usage_dict = {
-            "input": self.usage.input_tokens,
-            "output": self.usage.output_tokens,
-            "total": self.usage.input_tokens + self.usage.output_tokens,
-        }
+        input_tokens = int(getattr(response_usage, "prompt_tokens", 0) or 0)
+        output_tokens = int(getattr(response_usage, "completion_tokens", 0) or 0)
+        usage_dict = {"input": input_tokens, "output": output_tokens,
+                      "total": input_tokens + output_tokens}
         self.session_mgr.append_message(
             "assistant",
             blocks,
@@ -479,6 +486,7 @@ class GeneralSubagentSession:
             instructions_tokens=len(self._system_prompt) // 4,
             thinking_params=self._thinking_params or None,
             summary_runtime=self._summary_runtime,
+            **self._summary_credentials,
         )
 
         # Persist compaction entry to transcript with firstKeptEntryId.

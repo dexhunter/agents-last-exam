@@ -65,15 +65,65 @@ class SubagentUsage:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    cost_usd: float = 0.0
+    missing_cache_calls: int = 0
+    missing_cost_calls: int = 0
 
-    def to_dict(self) -> dict[str, int]:
-        return {"input_tokens": self.input_tokens, "output_tokens": self.output_tokens}
+    def add(self, usage: Any, cost: Any = None) -> None:
+        if hasattr(usage, "model_dump"):
+            usage = usage.model_dump()
+        if not isinstance(usage, dict):
+            usage = vars(usage) if hasattr(usage, "__dict__") else {}
+        input_tokens = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+        output_tokens = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+        if not input_tokens and not output_tokens:
+            return
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+        if hasattr(details, "model_dump"):
+            details = details.model_dump()
+        if not isinstance(details, dict):
+            details = {}
+        read = details.get("cached_tokens", usage.get("cache_read_input_tokens"))
+        write = details.get("cache_write_tokens", usage.get("cache_creation_input_tokens"))
+        if read is None and write is None:
+            self.missing_cache_calls += 1
+        self.cache_read_input_tokens += int(read or 0)
+        self.cache_write_input_tokens += int(write or 0)
+        provider_cost = usage.get("cost")
+        if isinstance(provider_cost, (int, float)):
+            cost = provider_cost
+        elif cost is None:
+            cost = usage.get("response_cost")
+        if isinstance(cost, (int, float)):
+            self.cost_usd += cost
+        else:
+            self.missing_cost_calls += 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_write_input_tokens": self.cache_write_input_tokens,
+            "cost_usd": self.cost_usd,
+            "missing_cache_calls": self.missing_cache_calls,
+            "missing_cost_calls": self.missing_cost_calls,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SubagentUsage":
         return cls(
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
+            cache_read_input_tokens=data.get("cache_read_input_tokens", 0),
+            cache_write_input_tokens=data.get("cache_write_input_tokens", 0),
+            cost_usd=data.get("cost_usd", 0.0),
+            missing_cache_calls=data.get("missing_cache_calls", 0),
+            missing_cost_calls=data.get("missing_cost_calls", 0),
         )
 
 
@@ -285,16 +335,20 @@ class SubagentRegistry:
         self._persist_run(run_id)
         self._completion_queue.put_nowait(run)
 
-    def kill(self, run_id: str) -> None:
+    def kill(self, run_id: str, usage: SubagentUsage | None = None) -> None:
         """Mark a run as killed.
 
         Does NOT cancel the asyncio.Task — that's the caller's responsibility. This only updates the registry record.
         """
         run = self._runs.get(run_id)
-        if run is None or run.status in _TERMINAL_STATUSES:
+        if run is None or (run.status in _TERMINAL_STATUSES and run.status != SubagentStatus.KILLED):
             return
+        if run.status == SubagentStatus.KILLED and usage is None:
+            return
+        if usage is not None:
+            run.usage = usage
         run.status = SubagentStatus.KILLED
-        run.ended_at = _now_iso()
+        run.ended_at = run.ended_at or _now_iso()
         self._inboxes.pop(run_id, None)
         self._persist_run(run_id)
 
@@ -337,6 +391,15 @@ class SubagentRegistry:
             task.cancel()
         self.kill(run_id)
         return True
+
+    async def close(self) -> None:
+        """Cancel and record any workers still active when the parent ends."""
+        pending = [task for task in self._tasks.values() if not task.done()]
+        for run_id, task in self._tasks.items():
+            if not task.done():
+                self.kill_run(run_id)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def active_count(self) -> int:
         """Count of PENDING + RUNNING general subagent runs."""

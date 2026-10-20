@@ -25,7 +25,7 @@ from PIL import Image
 
 from agent.decorators import register_agent
 from agent.loops.base import AsyncAgentConfig
-from agent.types import AgentCapability, Messages, Tools
+from agent.types import AgentCapability, Messages
 
 from ._message_shapes import _image_url_block
 from .cache_policy import apply_openclaw_cache_markers
@@ -49,7 +49,8 @@ async def _build_computer_tool_schema(computer_handler: Any) -> Dict[str, Any]:
     action schema.  This is the same schema upstream uses for GPT-5.4.
     """
     try:
-        width, height = await computer_handler.get_dimensions()
+        get_dimensions = getattr(computer_handler, "get_model_dimensions", computer_handler.get_dimensions)
+        width, height = await get_dimensions()
     except Exception:
         width, height = DEFAULT_DISPLAY_WIDTH, DEFAULT_DISPLAY_HEIGHT
 
@@ -100,7 +101,7 @@ async def _build_computer_tool_schema(computer_handler: Any) -> Dict[str, Any]:
                         "type": "string",
                     },
                     "keys": {
-                        "description": "Keys to press (for action=keypress). Example: ['ctrl', 'c']",
+                        "description": "Keys to press. Modifiers form a chord (e.g. ['ctrl', 'c']); other keys are pressed in sequence.",
                         "type": "array",
                         "items": {"type": "string"},
                     },
@@ -110,6 +111,10 @@ async def _build_computer_tool_schema(computer_handler: Any) -> Dict[str, Any]:
                     },
                     "scroll_y": {
                         "description": "Vertical scroll amount. Positive=down, negative=up.",
+                        "type": "integer",
+                    },
+                    "ms": {
+                        "description": "Duration in milliseconds for wait.",
                         "type": "integer",
                     },
                     "button": {
@@ -516,8 +521,12 @@ def _convert_response_to_output(response: Any) -> Dict[str, Any]:
         if "completion_tokens" in usage and "output_tokens" not in usage:
             usage["output_tokens"] = usage["completion_tokens"]
 
-    if hasattr(response, "_hidden_params"):
-        usage["response_cost"] = response._hidden_params.get("response_cost", 0.0)
+    hidden = getattr(response, "_hidden_params", None) or {}
+    cost = usage.get("cost")
+    if not isinstance(cost, (int, float)) and isinstance(hidden, dict):
+        cost = hidden.get("response_cost")
+    if isinstance(cost, (int, float)):
+        usage["response_cost"] = cost
 
     return {"output": output_items, "usage": usage}
 

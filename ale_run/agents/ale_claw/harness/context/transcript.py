@@ -9,6 +9,10 @@ Reference:
 
 from __future__ import annotations
 
+import ast
+import base64
+import binascii
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -132,11 +136,27 @@ def _computer_call_block(item: dict[str, Any]) -> dict[str, Any]:
 
 def _function_call_output_result(item: dict[str, Any]) -> dict[str, Any]:
     """A ``tool_result`` block from a function_call_output item."""
-    return {
+    result = {
         "type": "tool_result",
         "tool_use_id": item.get("call_id", ""),
         "content": item.get("output", ""),
     }
+    output = item.get("output")
+    if isinstance(output, str):
+        try:
+            output = json.loads(output)
+        except json.JSONDecodeError:
+            try:
+                output = ast.literal_eval(output)
+            except (ValueError, SyntaxError):
+                output = None
+    if isinstance(output, dict) and (
+        output.get("success") is False
+        or output.get("status") in ("error", "failed", "rejected")
+        or ("error" in output and output.get("success") is not True)
+    ):
+        result["is_error"] = True
+    return result
 
 
 def _computer_call_output_result(
@@ -155,6 +175,27 @@ def _computer_call_output_result(
     else:
         content_str = str(output)[:500]
     return {"type": "tool_result", "tool_use_id": call_id, "content": content_str}
+
+
+def _record_image(result: dict[str, Any], url: Any, trajectory_dir: Path | None) -> None:
+    if not isinstance(url, str) or not url.startswith("data:image/") or ";base64," not in url:
+        return
+    header, data = url.split(",", 1)
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (ValueError, binascii.Error):
+        return
+    image = {"media_type": header[5:].split(";", 1)[0]}
+    if trajectory_dir is None:
+        image["data"] = data
+    else:
+        media_dir = trajectory_dir / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        path = media_dir / hashlib.sha256(raw).hexdigest()
+        if not path.exists():
+            path.write_bytes(raw)
+        image["path"] = str(path.relative_to(trajectory_dir.parent))
+    result.setdefault("images", []).append(image)
 
 
 def group_step_output(
@@ -194,5 +235,18 @@ def group_step_output(
             tool_results.append(_function_call_output_result(item))
         elif item_type == "computer_call_output":
             tool_results.append(_computer_call_output_result(item, trajectory_dir))
+            output = item.get("output")
+            if isinstance(output, dict):
+                _record_image(tool_results[-1], output.get("image_url"), trajectory_dir)
+
+        if item.get("role") == "user" and tool_results:
+            for block in item.get("content", []) if isinstance(item.get("content"), list) else []:
+                if not isinstance(block, dict):
+                    continue
+                image = block.get("image_url")
+                url = image.get("url") if isinstance(image, dict) else image
+                if block.get("type") == "input_image":
+                    url = block.get("image_url")
+                _record_image(tool_results[-1], url, trajectory_dir)
 
     return assistant_content, tool_results
