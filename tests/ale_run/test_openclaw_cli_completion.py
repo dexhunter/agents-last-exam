@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import uuid
 from http.client import HTTPConnection
 from types import SimpleNamespace
 
@@ -15,257 +17,110 @@ from ale_run.base_interface.agent_deployer import AgentRunResult
 from ale_run.base_interface.trajectory import StepMetrics, TrajectoryBuilder
 
 
-class _LingeringOpenClawProcess:
-    pid = 4242
-    returncode = None
+def _run_cli_fixture(tmp_path, monkeypatch, envelope, *, channel="stdout", exit_code=0, linger=False, prompt="finish the task"):
+    import os
+    import sys
 
-    def __init__(self, *, stderr, envelope: dict) -> None:
-        stderr.write(json.dumps(envelope).encode())
-        stderr.flush()
-
-    def poll(self) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(deployer_module, "_FINAL_EXIT_GRACE_S", 0.1)
+    monkeypatch.setattr(deployer_module, "_TERM_GRACE_S", 0.1)
+    config = OpenClawCliConfig()
+    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
+    deployer = OpenClawCliDeployer(executor)
+    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
+    async def fake_gateway(*_):
+        return None, None
+    async def fake_wait(*_):
         return None
-
-
-@pytest.mark.parametrize(
-    "diagnostic",
-    [
-        {"error": "provider rejected request"},
-        {"payloads": [], "meta": None},
-        {"payloads": [], "meta": {"durationMs": "1234"}},
-    ],
-)
-def test_failed_exit_with_json_diagnostic_is_not_a_completed_run(tmp_path, monkeypatch, diagnostic):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    def fake_popen(*args, stderr, **kwargs):
-        stderr.write(json.dumps(diagnostic).encode())
-        return SimpleNamespace(pid=4242, returncode=1, poll=lambda: 1)
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-    result = asyncio.run(deployer.launch("finish the task"))
-    assert result.status == "failed"
-    assert result.exit_code == 1
-    assert "rc=1" in result.error
-
-
-def test_launch_finishes_when_result_envelope_is_complete(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0)
-
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    envelope = {
-        "payloads": [{"text": "done", "mediaUrl": None}],
-        "meta": {
-            "durationMs": 1234,
-            "agentMeta": {"sessionId": "session-1"},
-            "stopReason": "stop",
-        },
-    }
-    process = None
-
-    def fake_popen(*_, stderr, **__) -> _LingeringOpenClawProcess:
-        nonlocal process
-        process = _LingeringOpenClawProcess(
-            stderr=stderr,
-            envelope=envelope,
-        )
-        return process
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-
-    result = asyncio.run(deployer.launch("finish the task"))
-
-    assert process is not None
-    assert process.poll() is None
-    assert result.status == "completed"
-    assert result.exit_code is None
-
-
-def test_launch_ignores_transcript_image_staging_failure(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0)
-
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    session_dir = tmp_path / ".openclaw" / "agents" / "main" / "sessions"
-    session_dir.mkdir(parents=True)
-    (session_dir / "session-1.jsonl").write_text("{}\n")
-    envelope = {
-        "payloads": [{"text": "done", "mediaUrl": None}],
-        "meta": {
-            "durationMs": 1234,
-            "agentMeta": {"sessionId": "session-1"},
-            "stopReason": "stop",
-        },
-    }
-
-    def fake_popen(*_, stderr, **__) -> _LingeringOpenClawProcess:
-        return _LingeringOpenClawProcess(stderr=stderr, envelope=envelope)
-
-    def fail_staging(*_: object) -> None:
-        raise OSError("staging failed")
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(
-        deployer_module,
-        "stage_transcript_file_images",
-        fail_staging,
+    monkeypatch.setattr(deployer, "_start_gateway", fake_gateway)
+    monkeypatch.setattr(deployer, "_wait_for_subagents", fake_wait)
+    script = tmp_path / "fake_cli.py"
+    script.write_text(
+        "import json, pathlib, sys, time\n"
+        "p = pathlib.Path(sys.argv[sys.argv.index('--message-file') + 1])\n"
+        "pathlib.Path('received-prompt.txt').write_text(p.read_text(encoding='utf-8'), encoding='utf-8')\n"
+        "pathlib.Path('received-session.txt').write_text(sys.argv[sys.argv.index('--session-id') + 1])\n"
+        f"print({json.dumps(json.dumps(envelope))}, file=sys.{channel}, flush=True)\n"
+        f"time.sleep({30 if linger else 0})\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
     )
+    monkeypatch.setattr(deployer, "_launch_prefix", lambda: [sys.executable, str(script)])
+    monkeypatch.setattr(deployer, "_build_env", lambda *_: os.environ.copy())
+    result = asyncio.run(deployer.launch(prompt))
+    return result
 
-    result = asyncio.run(deployer.launch("finish the task"))
 
+def _envelope(**meta):
+    return {"payloads": [{"text": "done"}], "meta": {"durationMs": 25, **meta}}
+
+
+@pytest.mark.parametrize("channel", ["stdout", "stderr"])
+def test_launch_reads_envelope_and_reaps_lingering_process(tmp_path, monkeypatch, channel):
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(), channel=channel, linger=True)
     assert result.status == "completed"
     assert result.exit_code is None
+    with pytest.raises(ProcessLookupError):
+        os.kill(result.pid, 0)
+
+
+def test_launch_ignores_transcript_image_staging_failure(tmp_path, monkeypatch):
+    session = tmp_path / ".openclaw" / "agents" / "main" / "sessions"
+    session.mkdir(parents=True)
+    (session / "session-1.jsonl").write_text("{}\n")
+    def fail_staging(*_):
+        raise OSError("staging failed")
+    monkeypatch.setattr(deployer_module, "stage_transcript_file_images", fail_staging)
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(agentMeta={"sessionId": "session-1"}))
+    assert result.status == "completed"
     assert (tmp_path / "transcript.jsonl").is_file()
 
 
-def test_launch_marks_aborted_result_envelope_failed(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0)
-
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    envelope = {
-        "payloads": [
-            {
-                "text": (
-                    "The model did not produce a response before the LLM "
-                    "idle timeout."
-                ),
-                "mediaUrl": None,
-            }
-        ],
-        "meta": {
-            "durationMs": 1234,
-            "agentMeta": {"sessionId": "session-1"},
-            "aborted": True,
-        },
-    }
-
-    def fake_popen(*_, stderr, **__) -> _LingeringOpenClawProcess:
-        return _LingeringOpenClawProcess(
-            stderr=stderr,
-            envelope=envelope,
-        )
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-
-    result = asyncio.run(deployer.launch("finish the task"))
-
+@pytest.mark.parametrize("channel", ["stdout", "stderr"])
+def test_launch_marks_aborted_result_failed(tmp_path, monkeypatch, channel):
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(aborted=True), channel=channel)
     assert result.status == "failed"
-    assert result.exit_code is None
-    assert result.error == (
-        "agent aborted: The model did not produce a response before the LLM "
-        "idle timeout."
-    )
+    assert "agent aborted" in result.error
 
 
-def test_launch_marks_empty_terminal_response_failed(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0)
-
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    envelope = {
-        "payloads": [{"text": "intermediate work", "mediaUrl": None}],
-        "meta": {
-            "durationMs": 1234,
-            "agentMeta": {"sessionId": "session-1"},
-            "stopReason": "stop",
-            "replayInvalid": True,
-            "livenessState": "working",
-            "completion": {"stopReason": "stop", "finishReason": "stop"},
-        },
-    }
-
-    def fake_popen(*_, stderr, **__) -> _LingeringOpenClawProcess:
-        return _LingeringOpenClawProcess(stderr=stderr, envelope=envelope)
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-
-    result = asyncio.run(deployer.launch("finish the task"))
-
+def test_launch_marks_empty_terminal_response_failed(tmp_path, monkeypatch):
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(stopReason="stop", replayInvalid=True))
     assert result.status == "failed"
-    assert result.error == (
-        "OpenClaw completed with no usable terminal assistant response; "
-        "the episode must be retried"
-    )
+    assert "no usable terminal assistant response" in result.error
 
 
-def test_launch_accepts_terminal_response_when_replay_was_repaired(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(deployer_module, "_POLL_INTERVAL_S", 0)
-
-    config = OpenClawCliConfig()
-    executor = SimpleNamespace(config=config, work_dir=str(tmp_path), env={})
-    deployer = OpenClawCliDeployer(executor)
-    monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
-    monkeypatch.setattr(deployer, "_launch_prefix", lambda: ["openclaw"])
-    monkeypatch.setattr(deployer, "_build_env", lambda *_: {})
-
-    envelope = {
-        "payloads": [{"text": "done", "mediaUrl": None}],
-        "meta": {
-            "durationMs": 1234,
-            "agentMeta": {"sessionId": "session-1"},
-            "stopReason": "stop",
-            "replayInvalid": True,
-            "finalAssistantVisibleText": "done",
-        },
-    }
-
-    def fake_popen(*_, stderr, **__) -> _LingeringOpenClawProcess:
-        return _LingeringOpenClawProcess(stderr=stderr, envelope=envelope)
-
-    monkeypatch.setattr(deployer_module.subprocess, "Popen", fake_popen)
-
-    result = asyncio.run(deployer.launch("finish the task"))
-
+def test_launch_accepts_terminal_response_when_replay_was_repaired(tmp_path, monkeypatch):
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(stopReason="stop", replayInvalid=True, finalAssistantVisibleText="done"))
     assert result.status == "completed"
-    assert result.error is None
+
+
+@pytest.mark.parametrize("envelope", [{"error": "failure"}, _envelope()])
+def test_launch_rejects_nonzero_exit_even_with_envelope(tmp_path, monkeypatch, envelope):
+    result = _run_cli_fixture(tmp_path, monkeypatch, envelope, exit_code=1)
+    assert result.status == "failed"
+    assert result.exit_code == 1
+
+
+def test_launch_rejects_success_without_result_envelope(tmp_path, monkeypatch):
+    result = _run_cli_fixture(tmp_path, monkeypatch, {"status": "not a result"})
+    assert result.status == "failed"
+    assert "no valid OpenClaw result envelope" in result.error
+
+
+def test_launch_passes_long_prompt_via_file(tmp_path, monkeypatch):
+    prompt = "long prompt " * 15000
+    result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(), prompt=prompt)
+    assert result.status == "completed"
+    assert (tmp_path / "received-prompt.txt").read_text() == prompt
+
+
+def test_launch_uses_a_new_session_per_episode(tmp_path, monkeypatch):
+    _run_cli_fixture(tmp_path, monkeypatch, _envelope())
+    first = (tmp_path / "received-session.txt").read_text()
+    _run_cli_fixture(tmp_path, monkeypatch, _envelope())
+    second = (tmp_path / "received-session.txt").read_text()
+    assert uuid.UUID(first) != uuid.UUID(second)
 
 
 def test_parse_stderr_json_accepts_diagnostics_after_envelope() -> None:
@@ -581,7 +436,7 @@ def test_vision_usage_proxy_forwards_response_and_records_usage(
     }
 
 
-def test_parse_keeps_image_usage_in_openclaw_metadata_only(tmp_path) -> None:
+def test_parse_includes_separate_image_usage_in_totals(tmp_path) -> None:
     run_dir = tmp_path / "run"
     work_dir = run_dir / "origin_log" / "openclaw-cli"
     work_dir.mkdir(parents=True)
@@ -692,8 +547,9 @@ def test_parse_keeps_image_usage_in_openclaw_metadata_only(tmp_path) -> None:
         "output_tokens": 9,
     }
     assert trajectory.final_metrics is not None
-    assert trajectory.final_metrics.total_input_tokens == 100
-    assert trajectory.final_metrics.total_output_tokens == 20
+    assert trajectory.final_metrics.total_input_tokens == 190
+    assert trajectory.final_metrics.total_output_tokens == 29
+    assert trajectory.final_metrics.total_cost_usd is None
     assert "model_usage" not in trajectory.final_metrics.model_dump()
 
     raw_transcript = (work_dir / "transcript.jsonl").read_text()

@@ -32,8 +32,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .canonical_sanitize import (  # re-exported + used by sanitize_items
-    SYNTHETIC_TOOL_RESULT_CONTENT,
-    _SKIP_SYNTHESIS_STOP_REASONS,
+    SYNTHETIC_TOOL_RESULT_CONTENT as SYNTHETIC_TOOL_RESULT_CONTENT,
+    _SKIP_SYNTHESIS_STOP_REASONS as _SKIP_SYNTHESIS_STOP_REASONS,
     _get_openai_reasoning_signature,
     downgrade_openai_reasoning,
     drop_thinking_blocks,
@@ -128,6 +128,9 @@ def get_transcript_policy(model: str | Any) -> TranscriptPolicy:
 
     runtime = resolve_model(model)
     model_lower = runtime.model.lower()
+
+    if model_lower.startswith("openrouter/"):
+        return TranscriptPolicy(validate_anthropic_turns=False)
 
     if runtime.provider == "anthropic" or "claude" in model_lower:
         return TranscriptPolicy(
@@ -296,6 +299,9 @@ def _ingest_flat_item(
         elif isinstance(summary, str):
             text = summary
         block = ThinkingBlock(type="thinking", thinking=text)
+        for key in ("reasoning_content", "reasoning_details"):
+            if key in item:
+                block[key] = item[key]
         _append_or_merge(result, "assistant", [block])
         return
 
@@ -414,6 +420,9 @@ def _normalize_content(
             sig = block.get("thinkingSignature")
             if sig:
                 tb_thinking["thinkingSignature"] = sig
+            for key in ("reasoning_content", "reasoning_details"):
+                if key in block:
+                    tb_thinking[key] = block[key]
             blocks.append(tb_thinking)
 
         elif btype == "compaction_summary":
@@ -547,6 +556,10 @@ def canonical_to_responses_api(
                     })
 
             elif btype == "thinking":
+                fields = {key: block[key] for key in ("reasoning_content", "reasoning_details") if key in block}
+                if fields:
+                    items.append({"type": "reasoning", **fields})
+                    continue
                 signature = _get_openai_reasoning_signature(
                     block.get("thinkingSignature")
                 )
@@ -779,6 +792,9 @@ def canonical_to_anthropic_messages(
                     }
                     if block.get("thinkingSignature"):
                         tb["signature"] = block["thinkingSignature"]
+                    for key in ("reasoning_content", "reasoning_details"):
+                        if key in block:
+                            tb[key] = block[key]
                     content.append(tb)
                 elif btype == "compaction_summary":
                     content.append({"type": "text", "text": COMPACTION_PREAMBLE + block["text"]})

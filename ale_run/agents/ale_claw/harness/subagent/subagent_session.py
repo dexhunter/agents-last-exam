@@ -34,7 +34,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..model.model_config import ResolvedModel, resolve_model
+from ..model.model_config import ResolvedModel, merge_helper_generation_kwargs, resolve_model
+from ..model.reasoning import reasoning_fields
 from agent.tools.base import BaseTool
 
 from ..context.context import (
@@ -199,6 +200,10 @@ class GeneralSubagentSession:
         max_steps: int = DEFAULT_MAX_STEPS,
         max_compactions: int = DEFAULT_MAX_COMPACTIONS,
         thinking_params: dict[str, Any] | None = None,
+        summary_thinking_params: dict[str, Any] | None = None,
+        summary_thinking_overridden: bool = False,
+        generation_kwargs: dict[str, Any] | None = None,
+        summary_generation_kwargs: dict[str, Any] | None = None,
         summary_runtime: ResolvedModel | None = None,
         initial_screenshot_paths: list[str] | None = None,
         credentials: dict[str, str] | None = None,
@@ -213,6 +218,12 @@ class GeneralSubagentSession:
         self._max_steps = max_steps
         self._max_compactions = max_compactions
         self._thinking_params = thinking_params or {}
+        self._summary_thinking_params = (
+            self._thinking_params if summary_thinking_params is None else summary_thinking_params
+        )
+        self._summary_thinking_overridden = summary_thinking_overridden
+        self._generation_kwargs = generation_kwargs or {}
+        self._summary_generation_kwargs = summary_generation_kwargs or {}
         self._summary_runtime = summary_runtime
         self._credentials = credentials or {}
         self._summary_credentials = summary_credentials or {}
@@ -338,7 +349,10 @@ class GeneralSubagentSession:
             tool_calls = choice.message.tool_calls
 
             # 5. Append assistant message to transcript + in-memory list.
-            self._append_assistant(assistant_content, tool_calls, resp_usage)
+            self._append_assistant(
+                assistant_content, tool_calls, resp_usage,
+                reasoning=reasoning_fields(choice.message),
+            )
 
             # 6. Terminal: no tool calls => final text response.
             if not tool_calls:
@@ -358,7 +372,7 @@ class GeneralSubagentSession:
             "model": resolved.model,
             "messages": self._messages,
             "temperature": 1.0,
-            **self._thinking_params,
+            **merge_helper_generation_kwargs(self._generation_kwargs, self._thinking_params),
             **self._credentials,
         }
         if self._tool_schemas:
@@ -393,10 +407,11 @@ class GeneralSubagentSession:
         text: str,
         tool_calls: list[Any] | None,
         response_usage: Any = None,
+        reasoning: dict[str, Any] | None = None,
     ) -> None:
         """Append assistant turn to in-memory messages + transcript."""
         # In-memory chat-completions message (kept verbatim for litellm).
-        msg: dict[str, Any] = {"role": "assistant", "content": text}
+        msg: dict[str, Any] = {"role": "assistant", "content": text, **(reasoning or {})}
         if tool_calls:
             msg["tool_calls"] = [
                 {
@@ -413,6 +428,12 @@ class GeneralSubagentSession:
 
         # Canonical transcript blocks (text + function_call entries).
         blocks: list[dict[str, Any]] = []
+        if reasoning:
+            blocks.append({
+                "type": "thinking",
+                "thinking": reasoning.get("reasoning_content", ""),
+                **reasoning,
+            })
         if text:
             blocks.append({"type": "text", "text": text})
         if tool_calls:
@@ -484,7 +505,10 @@ class GeneralSubagentSession:
             self._summary_model,
             self.overflow_cb.context_window,
             instructions_tokens=len(self._system_prompt) // 4,
-            thinking_params=self._thinking_params or None,
+            thinking_params=merge_helper_generation_kwargs(
+                self._summary_generation_kwargs, self._summary_thinking_params,
+                override_thinking=self._summary_thinking_overridden,
+            ) or None,
             summary_runtime=self._summary_runtime,
             **self._summary_credentials,
         )

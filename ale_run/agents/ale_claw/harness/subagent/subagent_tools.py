@@ -35,7 +35,8 @@ from typing import Any
 from agent.tools.base import BaseTool, register_tool
 
 from ..memory.memory import MemoryStore
-from ..model.model_config import model_credentials
+from ..model.model_config import merge_helper_generation_kwargs, model_credentials, model_generation_kwargs
+from ..model.thinking import resolve_thinking_params
 from .subagent_general import DEFAULT_MAX_STEPS as GENERAL_DEFAULT_MAX_STEPS
 from .subagent_general import run_general_subagent
 from .subagent_gui import DEFAULT_MAX_STEPS as GUI_DEFAULT_MAX_STEPS
@@ -153,6 +154,8 @@ class DelegateGeneralTool(BaseTool):
         summary_model: str,
         parent_session_dir: Path,
         thinking_params: dict[str, Any] | None = None,
+        thinking_config: Any | None = None,
+        generation_kwargs: dict[str, Any] | None = None,
         auxiliary_model: str | None = None,
         primary_model: str | None = None,
         api_key: str | None = None,
@@ -166,6 +169,8 @@ class DelegateGeneralTool(BaseTool):
         self._summary_model = summary_model
         self._parent_session_dir = Path(parent_session_dir)
         self._thinking_params = thinking_params
+        self._thinking_config = thinking_config
+        self._generation_kwargs = generation_kwargs
         self._auxiliary_model = auxiliary_model
         self._primary_model = primary_model or default_model
         self._api_key = api_key
@@ -281,7 +286,20 @@ class DelegateGeneralTool(BaseTool):
             parent_session_dir=self._parent_session_dir,
             memory_store=self._memory_store,
             max_steps=max_steps,
-            thinking_params=self._thinking_params,
+            thinking_params=(
+                resolve_thinking_params(self._thinking_config.level, model, transport="chat")
+                if self._thinking_config is not None else self._thinking_params
+            ),
+            summary_thinking_params=(
+                self._thinking_config.compaction_params(self._summary_model)
+                if self._thinking_config is not None else None
+            ),
+            summary_thinking_overridden=(
+                self._thinking_config.compaction_level_overridden
+                if self._thinking_config is not None else False
+            ),
+            generation_kwargs=model_generation_kwargs(self._primary_model, model, self._generation_kwargs),
+            summary_generation_kwargs=model_generation_kwargs(self._primary_model, self._summary_model, self._generation_kwargs),
             initial_screenshot_paths=screenshot_paths,
             credentials=model_credentials(self._primary_model, model, self._api_key, self._api_base),
             summary_credentials=model_credentials(self._primary_model, self._summary_model, self._api_key, self._api_base),
@@ -317,6 +335,7 @@ class DelegateGUITool(BaseTool):
         parent_session_dir: Path,
         default_model: str = GUI_DEFAULT_MODEL,
         thinking_params: dict[str, Any] | None = None,
+        generation_kwargs: dict[str, Any] | None = None,
         memory_store: MemoryStore | None = None,
         auxiliary_model: str | None = None,
         primary_model: str | None = None,
@@ -329,6 +348,7 @@ class DelegateGUITool(BaseTool):
         self._parent_session_dir = Path(parent_session_dir)
         self._default_model = default_model
         self._thinking_params = thinking_params
+        self._generation_kwargs = generation_kwargs
         self._memory_store = memory_store
         self._auxiliary_model = auxiliary_model
         self._primary_model = primary_model or default_model
@@ -418,7 +438,10 @@ class DelegateGUITool(BaseTool):
                     run_id=run.run_id,
                     model=model,
                     max_steps=max_steps,
-                    thinking_params=self._thinking_params,
+                    thinking_params=merge_helper_generation_kwargs(
+                        model_generation_kwargs(self._primary_model, model, self._generation_kwargs),
+                        self._thinking_params, override_thinking=True,
+                    ),
                     parent_session_dir=self._parent_session_dir,
                     memory_store=self._memory_store,
                     credentials=model_credentials(self._primary_model, model, self._api_key, self._api_base),

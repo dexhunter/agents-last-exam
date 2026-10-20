@@ -60,11 +60,11 @@ class AleClawConfig:
     creds from env as before."""
 
     extra_generation_kwargs: dict = field(default_factory=dict)
-    """Extra kwargs merged into every model request (passed to ``agent.run`` →
-    ``litellm``). An escape hatch for gateway-specific quirks the loop hardcodes
-    otherwise. Later keys win, so this overrides the loop's defaults. Example for
-    Meta's Responses gateway (which rejects the loop's default ``truncation:
-    auto``): ``{truncation: disabled}``. Empty ⇒ loop defaults unchanged."""
+    """Extra model options. The main loop receives all options. Compatible
+    options also reach helpers and subagents: gateway-specific options stay on
+    the same provider, while sampling options follow an explicitly different
+    provider. Helper-owned token limits, timeouts, and Responses-only truncation
+    are not overridden. Per-helper thinking settings take precedence."""
 
     max_turns: int | None = 100
     """Mapped to OpenClaw's ``max_steps``. Hard ceiling on the agent run loop."""

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Literal, Tuple
+from typing import Any, List, Literal, Tuple
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,54 @@ def model_credentials(
     ):
         return {}
     return {key: value for key, value in (("api_key", api_key), ("api_base", api_base)) if value is not None}
+
+
+def model_generation_kwargs(
+    primary_model: str, target_model: str, kwargs: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Select generation options applicable to an auxiliary model call."""
+    primary_provider = primary_model.split("/", 1)[0] if "/" in primary_model else resolve_model(primary_model).provider
+    target_provider = target_model.split("/", 1)[0] if "/" in target_model else resolve_model(target_model).provider
+    same_provider = primary_provider == target_provider and (
+        primary_provider != "unknown" or primary_model == target_model
+    )
+    generic = {"temperature", "top_p", "seed", "presence_penalty", "frequency_penalty"}
+    reserved = {"model", "messages", "input", "tools", "stream", "api_key", "api_base", "timeout", "max_tokens", "max_turns", "truncation"}
+    return {
+        key: value for key, value in (kwargs or {}).items()
+        if key not in reserved and (same_provider or key in generic)
+    }
+
+
+_THINKING_OPTIONS = frozenset({
+    "reasoning", "reasoning_effort", "thinking", "thinking_level", "include_reasoning",
+})
+
+
+def merge_helper_generation_kwargs(
+    generation_kwargs: dict[str, Any] | None,
+    thinking_params: dict[str, Any] | None,
+    *,
+    override_thinking: bool = False,
+) -> dict[str, Any]:
+    """Merge inherited options with an optional helper-specific thinking level.
+
+    Main-loop extra kwargs override its default thinking. Helpers inherit that
+    effective setting unless their own thinking level is explicitly configured.
+    In particular, an explicit ``off`` must remove inherited thinking options
+    even though its resolved parameter dictionary is empty.
+    """
+    options = dict(generation_kwargs or {})
+    extra_body = options.get("extra_body")
+    nested_thinking = isinstance(extra_body, dict) and any(k in extra_body for k in _THINKING_OPTIONS)
+    if override_thinking:
+        options = {k: v for k, v in options.items() if k not in _THINKING_OPTIONS}
+        if nested_thinking:
+            options["extra_body"] = {k: v for k, v in extra_body.items() if k not in _THINKING_OPTIONS}
+        return {**options, **(thinking_params or {})}
+    if nested_thinking or any(k in options for k in _THINKING_OPTIONS):
+        return options
+    return {**(thinking_params or {}), **options}
 
 
 # ---------------------------------------------------------------------------

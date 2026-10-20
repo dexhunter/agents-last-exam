@@ -1,9 +1,9 @@
 """OpenClawCliConfig: per-episode knobs for the OpenClaw CLI deployer.
 
-OpenClaw is installed from a fork tarball (not public npm).
+OpenClaw is installed from the official npm package by default.
 CUA bridge is the native OpenClaw plugin (not MCP).
 
-Auth: API keys set via auth-profiles.json.
+Auth: API keys are imported into OpenClaw's SQLite credential store.
 """
 from __future__ import annotations
 
@@ -27,31 +27,6 @@ CUA_TOOL_NAMES = (
     "cursor_position",
 )
 
-# Mirrors the 12-entry deny list shipped in every agenthle
-# openclaw_*_openrouter*.yaml. The first seven are backend / late-binding
-# tools whose core impl reaches for a plugin we don't load (parity with the
-# gateway runner); the last five are gateway-only tools that raise
-# `1006 abnormal closure` under `agent --local` because there is no live
-# gateway WebSocket. Verified OS-agnostic on the 2026-05-03
-# demo_tool_smoke_test smoke matrix.
-_TOOLS_DENY = (
-    # backend / late-binding (parity with gateway runner)
-    "web_search",
-    "web_fetch",
-    "image_generate",
-    "video_generate",
-    "music_generate",
-    "memory_search",
-    "sessions_yield",
-    # gateway-only tools — `agent --local` has no live gateway WS
-    "sessions_list",
-    "sessions_history",
-    "sessions_spawn",
-    "sessions_send",
-    "cron",
-)
-
-
 @dataclass
 class OpenClawCliConfig:
     """Tunables for :class:`OpenClawCliDeployer`.
@@ -61,6 +36,9 @@ class OpenClawCliConfig:
     """
 
     name: ClassVar[str] = "openclaw-cli"
+
+    cli_version: str = "2026.10.5"
+    """Exact OpenClaw version installed from npm or the configured tarball."""
 
     # agenthle openclaw_cli_openrouter_gpt-5_4.yaml: openai/gpt-5.4.
     model: str = "openai/gpt-5.4"
@@ -136,14 +114,14 @@ class OpenClawCliConfig:
     not natively expose."""
 
     # OpenClaw's OWN internal run budget, written into openclaw.json
-    # (``timeoutSeconds``) and passed as ``agent --local --timeout <s>``.
+    # (``timeoutSeconds``) and passed as ``agent --timeout <s>``.
     # This is an agent-consumed knob (the CLI enforces it itself), distinct
     # from the orchestration episode budget. agenthle
     # openclaw_cli_openrouter_gpt-5_4.yaml: timeout_seconds: 600.
     agent_timeout_s: int = 600
 
-    # Maximum time between streamed model response chunks. This is separate
-    # from the overall agent timeout above.
+    # Retained for existing experiment configs. Official OpenClaw 2026.10.5
+    # no longer exposes this setting; the upstream timeout policy applies.
     llm_idle_timeout_s: int = 180
 
     # Provider-specific accepted values are validated by OpenClaw.
@@ -152,8 +130,7 @@ class OpenClawCliConfig:
     # same id as model; the dataclass default was None but every operational
     # openclaw_cli yaml pins it, so default to the gpt-5.4 operational value.
     vision_model: str | None = "openai/gpt-5.4"
-    """Image model used by both the explicit ``image`` tool and automatic
-    media understanding."""
+    """Fallback image model for tool and automatic media understanding."""
 
     vision_provider: str | None = None
     """Routing mode for ``vision_model``. ``None`` inherits ``provider``.
@@ -167,22 +144,16 @@ class OpenClawCliConfig:
     vision_api_key: str | None = None
     """Optional API key for the vision route. Native-provider environment
     variables are used when omitted."""
-    tools_deny: tuple[str, ...] = _TOOLS_DENY
-    # Matches the agenthle openclaw_*_openrouter*.yaml plugins.allow: the
-    # `memory-core` plugin provides the harmless `memory_get` file reader
-    # (`memory_search` is denied above). The resolved auth provider
-    # (`openrouter` / `openai` / `anthropic`) is appended at write time by
-    # the deployer, so it need not be listed here.
-    plugins_allow: tuple[str, ...] = ("cua", "openrouter", "memory-core")
+    tools_deny: tuple[str, ...] = ()
+    plugins_allow: tuple[str, ...] = ()
     plugins_deny: tuple[str, ...] = ()
-    heartbeat_every: str = "never"
+    heartbeat_every: str | None = None
 
-    tarball_path: str = "/opt/ale/openclaw-fork.tgz"
-    """Path to openclaw fork tarball inside the sandbox."""
+    tarball_path: str = ""
+    """Optional local OpenClaw package tarball inside the sandbox."""
 
     tarball_url: str = ""
-    """GitHub Release URL for the fork tarball. Used as fallback when
-    tarball_path does not exist on disk."""
+    """Optional package URL when ``tarball_path`` is empty or missing."""
 
     cua_plugin_path: str = "/opt/ale/openclaw-cua-plugin"
     """Path to CUA plugin source directory inside the sandbox."""

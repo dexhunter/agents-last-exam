@@ -1,9 +1,45 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from ale_run.agents.openclaw_cli import OpenClawCliConfig, OpenClawCliDeployer
+
+
+def test_default_preset_uses_official_cli_and_local_desktop_tools() -> None:
+    preset = yaml.safe_load(Path("configs/agents/openclaw_cli.yaml").read_text())
+    config = preset["config"]
+    assert config["cli_version"] == OpenClawCliConfig().cli_version
+    assert not config["tarball_path"] and not config["tarball_url"]
+    assert not config["tools_deny"] and not OpenClawCliConfig().tools_deny
+    assert not config["plugins_allow"] and not OpenClawCliConfig().plugins_allow
+
+
+def test_episode_state_isolated_from_existing_openclaw_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", "unrelated-config.json")
+    config = OpenClawCliConfig()
+    executor = SimpleNamespace(
+        config=config,
+        env={"OPENROUTER_API_KEY": "episode-key"},
+        cua_bridge_url=lambda: "http://127.0.0.1:5000",
+    )
+    deployer = OpenClawCliDeployer(executor)
+    deployer._episode_state_dir = tmp_path / "episode-state"
+    deployer._write_config(config)
+
+    assert not (tmp_path / ".openclaw").exists()
+    generated = json.loads((deployer._state_dir / "openclaw.json").read_text())
+    assert "deny" not in generated["tools"]
+    assert "toolSearch" not in generated["tools"]
+    assert "allow" not in generated["plugins"]
+    assert generated["agents"]["defaults"]["modelPolicy"] == {"allow": []}
+    env = deployer._build_env(config, deployer._state_dir / ".env")
+    assert env["OPENCLAW_STATE_DIR"] == str(deployer._state_dir)
+    assert "OPENCLAW_CONFIG_PATH" not in env
 
 
 def test_write_config_supports_zai_primary_and_direct_openai_vision(
@@ -44,15 +80,12 @@ def test_write_config_supports_zai_primary_and_direct_openai_vision(
     defaults = openclaw_config["agents"]["defaults"]
     assert defaults["model"]["primary"] == "zai/glm-5.2"
     assert defaults["imageModel"]["primary"] == "openai/gpt-5.4"
-    assert defaults["llm"]["idleTimeoutSeconds"] == 180
+    assert "llm" not in defaults
     assert defaults["models"]["zai/glm-5.2"]["params"] == cfg.model_params
+    assert defaults["modelPolicy"] == {"allow": []}
     assert defaults["models"]["openai/gpt-5.4"] == {}
-    assert openclaw_config["tools"]["media"]["image"]["models"] == [
-        {"provider": "openai", "model": "gpt-5.4"}
-    ]
-    assert {"cua", "zai", "openai"} <= set(
-        openclaw_config["plugins"]["allow"]
-    )
+    assert "media" not in openclaw_config["tools"]
+    assert "allow" not in openclaw_config["plugins"]
     assert openclaw_config["models"]["providers"] == {
         "zai": {
             "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
@@ -129,9 +162,7 @@ def test_write_config_supports_custom_primary_and_direct_openai_vision(
     assert defaults["models"]["azure-code/rc6-for-vlm-team"]["params"] == {
         "temperature": 1.0,
     }
-    assert openclaw_config["tools"]["media"]["image"]["models"] == [
-        {"provider": "openai", "model": "gpt-5.4"},
-    ]
+    assert "media" not in openclaw_config["tools"]
     assert "openai" in openclaw_config["plugins"]["allow"]
     assert "azure-code" not in openclaw_config["plugins"]["allow"]
     assert openclaw_config["models"]["providers"] == {
@@ -206,9 +237,7 @@ def test_write_config_supports_custom_native_vision_model(
     defaults = openclaw_config["agents"]["defaults"]
     assert defaults["model"]["primary"] == "moonshot/kimi-k2.7-code"
     assert defaults["imageModel"]["primary"] == "moonshot/kimi-k2.7-code"
-    assert openclaw_config["tools"]["media"]["image"]["models"] == [
-        {"provider": "moonshot", "model": "kimi-k2.7-code"},
-    ]
+    assert "media" not in openclaw_config["tools"]
     assert openclaw_config["models"]["providers"] == {
         "moonshot": {
             "baseUrl": "https://api.moonshot.ai/v1",

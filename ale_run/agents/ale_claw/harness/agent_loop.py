@@ -36,7 +36,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from agent.agent import ComputerAgent, assert_callable_with, get_json, get_output_call_ids
 from agent.computers.base import AsyncComputerHandler
 from agent.computers.cua import cuaComputerHandler
-from .model.model_config import ResolvedModel, resolve_model
+from .model.model_config import ResolvedModel, merge_helper_generation_kwargs, model_generation_kwargs, resolve_model
 from agent.responses import make_tool_error_item, replace_failed_computer_calls_with_function_calls
 from agent.tools.base import BaseTool
 from agent.types import ToolError
@@ -176,6 +176,7 @@ class OpenClawComputerAgent(ComputerAgent):
         self.summary_runtime = summary_runtime
         self._helper_api_key: Optional[str] = None
         self._helper_api_base: Optional[str] = None
+        self._helper_generation_kwargs: Dict[str, Any] = {}
         self._registry = registry
         # Stable bootstrap files re-injected post-compaction so the agent
         # re-anchors on workspace rules after the lossy summary. Mirrors
@@ -397,6 +398,9 @@ class OpenClawComputerAgent(ComputerAgent):
         helper_model = (
             self.summary_runtime.model if self.summary_runtime else self.summary_model
         )
+        self._helper_generation_kwargs = model_generation_kwargs(
+            primary_model, helper_model, additional_generation_kwargs
+        )
         primary_provider = (
             primary_model.split("/", 1)[0] if "/" in primary_model
             else resolve_model(primary_model).provider
@@ -479,13 +483,15 @@ class OpenClawComputerAgent(ComputerAgent):
             flush_prompt=MEMORY_FLUSH_PROMPT,
             flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
             silent_token=SILENT_REPLY_TOKEN,
-            thinking_params=(
+            thinking_params=merge_helper_generation_kwargs(
+                getattr(self, "_helper_generation_kwargs", {}),
                 self.thinking_config.flush_params(
                     self.summary_model,
                     runtime=self.summary_runtime,
                 )
                 if self.thinking_config is not None
-                else None
+                else {},
+                override_thinking=(self.thinking_config.flush_level_overridden if self.thinking_config else False),
             ),
             summary_runtime=self.summary_runtime,
             api_key=self._helper_api_key,
@@ -997,13 +1003,15 @@ class OpenClawComputerAgent(ComputerAgent):
             self.summary_model,
             self.overflow_cb.context_window,
             instructions_tokens=len(self.instructions or "") // 4,
-            thinking_params=(
+            thinking_params=merge_helper_generation_kwargs(
+                getattr(self, "_helper_generation_kwargs", {}),
                 self.thinking_config.compaction_params(
                     self.summary_model,
                     runtime=self.summary_runtime,
                 )
                 if self.thinking_config is not None
-                else None
+                else {},
+                override_thinking=(self.thinking_config.compaction_level_overridden if self.thinking_config else False),
             ),
             summary_runtime=self.summary_runtime,
             api_key=self._helper_api_key,

@@ -501,6 +501,11 @@ def _unnest_assistant_blocks(
             })
 
         elif btype == "thinking":
+            fields = {key: block[key] for key in ("reasoning_content", "reasoning_details") if key in block}
+            if fields:
+                pending_text = _flush_pending_text(items, pending_text)
+                items.append({"type": "reasoning", **fields})
+                continue
             signature = _get_openai_reasoning_signature(block.get("thinkingSignature"))
             if signature is None:
                 continue

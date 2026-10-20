@@ -67,6 +67,8 @@ class ThinkingConfig:
     compaction_level: ThinkLevel = ThinkLevel.OFF
     vision_level: ThinkLevel = ThinkLevel.OFF
     gui_level: ThinkLevel = ThinkLevel.OFF
+    flush_level_overridden: bool = False
+    compaction_level_overridden: bool = False
 
     def to_api_params(self, model: str) -> dict[str, Any]:
         """Return provider-specific kwargs for the main agent loop."""
