@@ -135,13 +135,13 @@ Recovered prompt:
 
 Inputs / Environment:
 - The benchmark data for this variant is staged under {self.task_dir}.
-- The VM is expected to provide a working local Odoo web server at {self.DEFAULT_ODOO_URL}.
+- The local Odoo web server is at {self.DEFAULT_ODOO_URL}. Prepare or restore the environment as needed to complete the task.
 - If the Odoo service is available, use {self.launch_script_path} to open the correct database in a browser.
-- Task setup resets database "{self.DEFAULT_DB_NAME}" from template "{self.TEMPLATE_DB_NAME}" when the PostgreSQL tools are available.
+- Task setup attempts to reset database "{self.DEFAULT_DB_NAME}" from template "{self.TEMPLATE_DB_NAME}".
 - You must work ONLY inside database "{self.DEFAULT_DB_NAME}".
 - Use the run tag "{self.RUN_TAG}" in searchable fields such as Reference / Notes / Customer Ref / Vendor Ref on key documents you create manually.
 - The agent-visible task prompt is staged at {self.prompt_path}.
-- Odoo web login: {self.DEFAULT_ODOO_ADMIN_LOGIN} / {self.DEFAULT_ODOO_ADMIN_PASSWORD} (credentials are set by task setup).
+- Odoo web login: {self.DEFAULT_ODOO_ADMIN_LOGIN} / {self.DEFAULT_ODOO_ADMIN_PASSWORD} (task setup attempts to set these credentials).
 
 Warehouses:
 - Inbound warehouse code: "WH" (location tree rooted at "WH/Stock")
@@ -252,6 +252,12 @@ async def _resolve_pg_paths(session: cb.DesktopSession, metadata: dict, work_dir
             metadata[mkey] = found[key]
 
 
+class PsqlCommandError(RuntimeError):
+    def __init__(self, status: int, stderr: str | None):
+        self.status = status
+        super().__init__(f"psql failed rc={status}, stderr={stderr}")
+
+
 async def _run_psql_json(
     session: cb.DesktopSession,
     psql_path: str,
@@ -264,21 +270,24 @@ async def _run_psql_json(
     sql_path = win_join(work_dir, "autograde.sql")
     await session.write_file(sql_path, sql_text)
 
-    if pg_password:
-        cmd = (
-            'powershell -NoProfile -Command '
-            f'"$env:PGPASSWORD=\'{pg_password}\'; '
-            f"& '{psql_path}' {psql_args} -d {db_name} -t -A -q -f \\\"{sql_path}\\\"\""
-        )
-    else:
-        cmd = f'"{psql_path}" {psql_args} -d {db_name} -t -A -q -f "{sql_path}"'
-
+    password_assignment = f"$env:PGPASSWORD='{pg_password}'; " if pg_password else ""
+    marker = "__ALE_PSQL_STATUS__="
+    cmd = (
+        'powershell -NoProfile -Command "'
+        f"{password_assignment}& '{psql_path}' {psql_args} -d {db_name} -v ON_ERROR_STOP=1 -t -A -q -f \\\"{sql_path}\\\"; "
+        f"$psql_status=$LASTEXITCODE; Write-Output ('{marker}' + $psql_status); exit $psql_status\""
+    )
     res = await session.run_command(cmd, check=False)
-    if res.get("return_code", 1) != 0:
-        raise RuntimeError(f"psql failed rc={res.get('return_code')}, stderr={res.get('stderr')}")
-
     raw = (res.get("stdout") or "").strip()
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines or not lines[-1].startswith(marker):
+        raise RuntimeError(f"psql status not reported, stderr={res.get('stderr')}")
+    try:
+        status = int(lines.pop()[len(marker):])
+    except ValueError as exc:
+        raise RuntimeError(f"invalid psql status, stderr={res.get('stderr')}") from exc
+    if status != 0:
+        raise PsqlCommandError(status, res.get("stderr"))
     if not lines:
         raise RuntimeError("psql returned empty output")
     return json.loads(lines[-1])
@@ -491,6 +500,15 @@ SELECT json_build_object(
   'purchase_order', to_regclass('public.purchase_order'),
   'purchase_order_line', to_regclass('public.purchase_order_line'),
   'account_move', to_regclass('public.account_move'),
+  'account_move_line', to_regclass('public.account_move_line'),
+  'sale_order_line_invoice_rel', to_regclass('public.sale_order_line_invoice_rel'),
+  'res_currency', to_regclass('public.res_currency'),
+  'res_currency_rate', to_regclass('public.res_currency_rate'),
+  'res_company', to_regclass('public.res_company'),
+  'res_partner', to_regclass('public.res_partner'),
+  'product_category', to_regclass('public.product_category'),
+  'ir_model_fields', to_regclass('public.ir_model_fields'),
+  'ir_default', to_regclass('public.ir_default'),
   'stock_quant', to_regclass('public.stock_quant'),
   'stock_lot', to_regclass('public.stock_lot'),
   'stock_scrap', to_regclass('public.stock_scrap'),
@@ -499,12 +517,19 @@ SELECT json_build_object(
   'stock_picking', to_regclass('public.stock_picking'),
   'stock_picking_type', to_regclass('public.stock_picking_type'),
   'stock_move_line', to_regclass('public.stock_move_line'),
+  'stock_move', to_regclass('public.stock_move'),
   'mrp_production', to_regclass('public.mrp_production'),
   'mrp_workorder', to_regclass('public.mrp_workorder'),
+  'mrp_bom', to_regclass('public.mrp_bom'),
+  'mrp_bom_line', to_regclass('public.mrp_bom_line'),
+  'mrp_routing_workcenter', to_regclass('public.mrp_routing_workcenter'),
+  'mrp_workcenter', to_regclass('public.mrp_workcenter'),
   'stock_landed_cost', to_regclass('public.stock_landed_cost'),
+  'stock_landed_cost_lines', to_regclass('public.stock_landed_cost_lines'),
   'stock_valuation_adjustment_lines', to_regclass('public.stock_valuation_adjustment_lines'),
   'account_analytic_line', to_regclass('public.account_analytic_line'),
-  'account_analytic_account', to_regclass('public.account_analytic_account')
+  'account_analytic_account', to_regclass('public.account_analytic_account'),
+  'hr_expense', to_regclass('public.hr_expense')
 )::text;
 """
     try:
@@ -519,30 +544,71 @@ SELECT json_build_object(
         )
         report["evidence"]["preflight"] = pre
         needed = [
+            "product_template",
+            "product_product",
+            "product_category",
+            "ir_model_fields",
+            "ir_default",
+            "res_currency",
+            "res_currency_rate",
+            "res_company",
+            "res_partner",
             "stock_landed_cost",
+            "stock_landed_cost_lines",
             "stock_valuation_adjustment_lines",
             "stock_warehouse",
             "stock_quant",
+            "stock_lot",
+            "stock_scrap",
+            "stock_location",
+            "stock_picking_type",
             "account_move",
+            "account_move_line",
             "sale_order",
+            "sale_order_line",
+            "sale_order_line_invoice_rel",
             "purchase_order",
+            "purchase_order_line",
             "mrp_production",
+            "mrp_workorder",
+            "mrp_bom",
+            "mrp_bom_line",
+            "mrp_routing_workcenter",
+            "mrp_workcenter",
             "stock_picking",
             "stock_move_line",
+            "stock_move",
+            "account_analytic_line",
+            "account_analytic_account",
         ]
         ok = all(pre.get(item) is not None for item in needed)
         report["checks"]["db_preflight_ok"] = ok
         if not ok:
             await _write_report(session, out_dir=out_dir, work_dir=work_dir, report=report)
             return [0.0]
+    except PsqlCommandError as exc:
+        report["checks"]["db_preflight_ok"] = False
+        report["checks"]["db_preflight_error"] = str(exc)
+        await _write_report(session, out_dir=out_dir, work_dir=work_dir, report=report)
+        if exc.status == 2:
+            return [0.0]
+        raise RuntimeError(f"Odoo database preflight failed: {exc}") from exc
     except Exception as exc:
         report["checks"]["db_preflight_ok"] = False
         report["checks"]["db_preflight_error"] = str(exc)
         await _write_report(session, out_dir=out_dir, work_dir=work_dir, report=report)
-        return [0.0]
+        raise RuntimeError(f"Odoo database preflight failed: {exc}") from exc
 
     schema_sql = r'''
 SELECT json_build_object(
+  'module_columns_ok', NOT EXISTS (
+    SELECT 1 FROM (VALUES ('stock_move','sale_line_id'), ('stock_move','purchase_line_id'),
+                          ('stock_picking','sale_id'), ('purchase_order_line','sale_line_id'),
+                          ('account_move_line','purchase_line_id')) AS required(table_name, column_name)
+    WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns column_info
+                      WHERE column_info.table_schema='public' AND column_info.table_name=required.table_name
+                        AND column_info.column_name=required.column_name)
+  ),
   'sml_qty_col',
     CASE
       WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='stock_move_line' AND column_name='qty_done') THEN 'qty_done'
@@ -576,6 +642,10 @@ SELECT json_build_object(
             task_cfg.metadata["pg_password"],
         )
         report["evidence"]["schema"] = schema
+        if schema.get("module_columns_ok") is False:
+            report["checks"]["required_odoo_modules_installed"] = False
+            await _write_report(session, out_dir=out_dir, work_dir=work_dir, report=report)
+            return [0.0]
     except Exception as exc:
         schema = {}
         report["evidence"]["schema_error"] = str(exc)
@@ -590,13 +660,31 @@ SELECT json_build_object(
     if scrap_qty_col not in ("scrap_qty", "product_qty", "product_uom_qty"):
         scrap_qty_col = "scrap_qty"
 
+    expense_sql = "SELECT 0 AS cnt"
+    if pre.get("hr_expense"):
+        expense_sql = f"""
+  SELECT COUNT(*) AS cnt
+  FROM account_analytic_line aal
+  JOIN account_analytic_account aaa ON aaa.id = aal.account_id
+  JOIN account_move_line aml ON aml.id = aal.move_line_id
+  JOIN account_move am ON am.id = aml.move_id
+  JOIN hr_expense expense ON expense.account_move_id = am.id
+  JOIN res_currency currency ON currency.id = expense.currency_id AND currency.name='USD'
+  WHERE aaa.name::text ILIKE '%AN-{run_tag}%'
+    AND aal.name::text ILIKE '%Travel to Berlin%'
+    AND ABS(aal.amount + 123.45) < 0.01
+    AND expense.name='Travel to Berlin' AND ABS(expense.total_amount_currency - 123.45) < 0.01
+    AND expense.state='paid' AND expense.approval_state='approved'
+    AND am.state='posted' AND am.payment_state='paid'
+"""
+
     sql = f"""
 WITH
 prod AS (
   SELECT pp.id AS product_id, pt.default_code
   FROM product_product pp
   JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE pt.default_code IN ('FP-1000','SA-200','SC-300','RM-010','RM-020','RM-030','RM-040','ACC-900')
+  WHERE pt.default_code IN ('FP-1000','SA-200','SC-300','RM-010','RM-020','RM-030','RM-040','ACC-900','FREIGHT-100')
 ),
 eur AS (SELECT id AS currency_id FROM res_currency WHERE name='EUR' LIMIT 1),
 lc AS (
@@ -604,10 +692,21 @@ lc AS (
   FROM stock_landed_cost slc
   JOIN stock_valuation_adjustment_lines sval ON sval.cost_id = slc.id
   JOIN prod p ON p.product_id = sval.product_id
-  WHERE p.default_code IN ('RM-010','RM-020')
+  JOIN stock_landed_cost_lines cost_line ON cost_line.id = sval.cost_line_id
+  JOIN prod freight ON freight.product_id = cost_line.product_id AND freight.default_code='FREIGHT-100'
+  JOIN stock_move move ON move.id = sval.move_id
+  JOIN purchase_order_line pol ON pol.id = move.purchase_line_id
+  JOIN purchase_order po ON po.id = pol.order_id
+  JOIN res_partner vendor ON vendor.id = po.partner_id
+    AND (vendor.ref='V-CN01' OR vendor.name='V-CN01' OR vendor.name LIKE 'V-CN01 %')
+  WHERE slc.state = 'done' AND p.default_code IN ('RM-010','RM-020')
+    AND cost_line.split_method='by_current_cost_price' AND ABS(cost_line.price_unit - 100) < 0.01
+    AND (COALESCE(po.partner_ref,'') ILIKE '%{run_tag}%'
+         OR COALESCE(po.origin,'') ILIKE '%{run_tag}%'
+         OR COALESCE(po.name,'') ILIKE '%{run_tag}%')
     AND (COALESCE(slc.name,'') ILIKE '%{run_tag}%' OR COALESCE(slc.description,'') ILIKE '%{run_tag}%')
-  GROUP BY slc.id
-  HAVING ABS(SUM(sval.additional_landed_cost) - 100.0) < 0.0001
+  GROUP BY slc.id, po.id
+  HAVING COUNT(DISTINCT p.default_code) = 2 AND ABS(SUM(sval.additional_landed_cost) - 100.0) < 0.0001
   ORDER BY slc.id DESC
   LIMIT 1
 ),
@@ -619,16 +718,30 @@ lc_split AS (
   GROUP BY p.default_code
 ),
 lc_bill_paid AS (
-  SELECT COUNT(*) AS cnt
+  SELECT COUNT(DISTINCT am.id) AS cnt
   FROM stock_landed_cost slc
   JOIN lc ON lc.id = slc.id
-  JOIN account_move am ON am.id = slc.vendor_bill_id
+  JOIN account_move am ON (am.id = slc.vendor_bill_id OR COALESCE(am.ref,'') ILIKE '%{run_tag}%'
+                           OR COALESCE(am.invoice_origin,'') ILIKE '%{run_tag}%'
+                           OR COALESCE(am.narration,'') ILIKE '%{run_tag}%')
+  JOIN res_currency currency ON currency.id = am.currency_id AND currency.name = 'USD'
+  JOIN account_move_line aml ON aml.move_id = am.id
+  JOIN prod product ON product.product_id = aml.product_id AND product.default_code = 'FREIGHT-100'
   WHERE am.move_type='in_invoice' AND am.state='posted' AND am.payment_state='paid'
+    AND ABS(aml.price_subtotal - 100) < 0.01
 ),
 so_candidate AS (
-  SELECT so.id, so.name,
+  SELECT so.id, so.name, so.company_id,
          SUM(CASE WHEN pt.default_code='FP-1000' THEN sol.product_uom_qty ELSE 0 END) AS fp_qty,
          SUM(CASE WHEN pt.default_code='ACC-900' THEN sol.product_uom_qty ELSE 0 END) AS acc_qty,
+         BOOL_OR(customer.ref='CUST-EU01' OR commercial.ref='CUST-EU01'
+                 OR customer.name='CUST-EU01' OR customer.name LIKE 'CUST-EU01 %'
+                 OR commercial.name='CUST-EU01' OR commercial.name LIKE 'CUST-EU01 %') AS customer_ok,
+         MAX(currency.name) AS currency_name,
+         BOOL_AND(CASE WHEN sol.product_uom_qty = 0 THEN TRUE
+                       WHEN pt.default_code='FP-1000' THEN COALESCE(ABS(sol.price_unit - 200) < 0.01, FALSE)
+                       WHEN pt.default_code='ACC-900' THEN COALESCE(ABS(sol.price_unit - 30) < 0.01, FALSE)
+                       ELSE FALSE END) AS prices_ok,
          BOOL_OR(
            COALESCE(so.client_order_ref,'') ILIKE '%{run_tag}%'
            OR COALESCE(so.origin,'') ILIKE '%{run_tag}%'
@@ -640,80 +753,259 @@ so_candidate AS (
   JOIN sale_order_line sol ON sol.order_id = so.id
   JOIN product_product pp ON pp.id = sol.product_id
   JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  LEFT JOIN res_partner customer ON customer.id = so.partner_id
+  LEFT JOIN res_partner commercial ON commercial.id = customer.commercial_partner_id
+  LEFT JOIN res_currency currency ON currency.id = so.currency_id
   WHERE pt.default_code IN ('FP-1000','ACC-900')
-  GROUP BY so.id, so.name
+  GROUP BY so.id, so.name, so.company_id
 ),
 so AS (
   SELECT * FROM so_candidate WHERE has_tag ORDER BY id DESC LIMIT 1
 ),
+company AS (
+  SELECT company.* FROM res_company company JOIN so ON so.company_id = company.id
+),
+currency_rates AS (
+  SELECT currency.name, currency.active,
+    COALESCE(
+      (SELECT rate.rate FROM res_currency_rate rate
+       WHERE rate.currency_id = currency.id AND rate.name <= CURRENT_DATE
+         AND (rate.company_id IS NULL OR rate.company_id = company.id)
+       ORDER BY rate.company_id NULLS LAST, rate.name DESC LIMIT 1),
+      (SELECT rate.rate FROM res_currency_rate rate
+       WHERE rate.currency_id = currency.id AND (rate.company_id IS NULL OR rate.company_id = company.id)
+       ORDER BY rate.company_id NULLS LAST, rate.name ASC LIMIT 1), 1.0
+    ) AS rate
+  FROM res_currency currency CROSS JOIN company
+  WHERE currency.name IN ('USD','EUR','CNY')
+),
+fx_evidence AS (
+  SELECT EXISTS (SELECT 1 FROM company JOIN res_currency currency ON currency.id = company.currency_id WHERE currency.name='USD')
+    AND EXISTS (SELECT 1 FROM currency_rates usd, currency_rates eur, currency_rates cny
+                WHERE usd.name='USD' AND eur.name='EUR' AND cny.name='CNY'
+                  AND eur.active AND cny.active AND eur.rate > 0 AND cny.rate > 0
+                  AND ABS(usd.rate / eur.rate - 1.20) < 0.0001
+                  AND ABS(usd.rate / cny.rate - 0.125) < 0.0001) AS ok
+),
+category_defaults AS (
+  SELECT field.name,
+    (SELECT NULLIF(defaults.json_value::jsonb #>> '{{}}', 'false')
+     FROM ir_default defaults
+     WHERE defaults.field_id = field.id AND defaults.condition IS NULL
+       AND (defaults.user_id IS NULL OR defaults.user_id=1)
+       AND (defaults.company_id IS NULL OR defaults.company_id=company.id)
+     ORDER BY defaults.user_id NULLS LAST, defaults.company_id NULLS LAST, defaults.id LIMIT 1) AS value
+  FROM ir_model_fields field CROSS JOIN company
+  WHERE field.model='product.category' AND field.name IN ('property_cost_method','property_valuation')
+),
+valuation_evidence AS (
+  SELECT COUNT(DISTINCT product.default_code) = 8
+     AND BOOL_AND(product.is_storable
+       AND COALESCE(category.property_cost_method ->> company.id::text,
+                    (SELECT value FROM category_defaults WHERE name='property_cost_method'), company.cost_method) = 'fifo'
+       AND COALESCE(category.property_valuation ->> company.id::text,
+                    (SELECT value FROM category_defaults WHERE name='property_valuation'), company.inventory_valuation) = 'real_time') AS ok
+  FROM product_template product
+  JOIN product_category category ON category.id = product.categ_id
+  CROSS JOIN company
+  WHERE product.default_code IN ('FP-1000','SA-200','SC-300','RM-010','RM-020','RM-030','RM-040','ACC-900')
+),
 dropship_done AS (
-  SELECT COUNT(*) AS cnt
+  SELECT COALESCE(SUM(CASE WHEN src.usage='supplier' AND dest.usage='customer'
+                           THEN sml.{sml_qty_col}
+                           WHEN src.usage='customer' AND dest.usage='supplier'
+                           THEN -sml.{sml_qty_col} ELSE 0 END), 0) AS qty
   FROM stock_move_line sml
-  JOIN stock_picking sp ON sp.id = sml.picking_id
-  JOIN stock_picking_type spt ON spt.id = sp.picking_type_id
+  JOIN stock_move sm ON sm.id = sml.move_id
+  JOIN stock_picking sp ON sp.id = sm.picking_id
+  JOIN stock_location src ON src.id = sml.location_id
+  JOIN stock_location dest ON dest.id = sml.location_dest_id
+  LEFT JOIN sale_order_line sol ON sol.id = sm.sale_line_id
+  LEFT JOIN purchase_order_line pol ON pol.id = sm.purchase_line_id
+  LEFT JOIN sale_order_line purchase_sol ON purchase_sol.id = pol.sale_line_id
   JOIN product_product pp ON pp.id = sml.product_id
   JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE spt.code='dropship' AND sp.state='done'
+  JOIN so ON so.id = COALESCE(sol.order_id, purchase_sol.order_id, sp.sale_id)
+  WHERE sp.state='done'
     AND pt.default_code='ACC-900'
-  GROUP BY sp.id
-  HAVING ABS(SUM(sml.{sml_qty_col}) - 3.0) < 0.0001
-),
-mo_sa_done AS (
-  SELECT COUNT(*) AS cnt
-  FROM mrp_production mp
-  JOIN product_product pp ON pp.id = mp.product_id
-  JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE pt.default_code='SA-200' AND mp.state='done' AND ABS(mp.product_qty - 3.0) < 0.0001
 ),
 mo_fp_done AS (
-  SELECT COUNT(*) AS cnt
+  SELECT mp.id, mp.name, mp.bom_id, mp.product_qty
   FROM mrp_production mp
   JOIN product_product pp ON pp.id = mp.product_id
   JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE pt.default_code='FP-1000' AND mp.state='done' AND ABS(mp.product_qty - 3.0) < 0.0001
+  JOIN so ON (COALESCE(mp.origin,'') ILIKE '%' || so.name || '%'
+              OR COALESCE(mp.origin,'') ILIKE '%{run_tag}%')
+  WHERE pt.default_code='FP-1000' AND mp.state='done'
+),
+mo_sa_done AS (
+  SELECT mp.id, mp.name, mp.bom_id, mp.product_qty
+  FROM mrp_production mp
+  JOIN product_product pp ON pp.id = mp.product_id
+  JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  JOIN so ON (COALESCE(mp.origin,'') ILIKE '%' || so.name || '%'
+              OR COALESCE(mp.origin,'') ILIKE '%{run_tag}%'
+              OR EXISTS (SELECT 1 FROM mo_fp_done fp WHERE COALESCE(mp.origin,'') ILIKE '%' || fp.name || '%'))
+  WHERE pt.default_code='SA-200' AND mp.state='done'
 ),
 workorders_done AS (
-  SELECT COUNT(*) AS cnt
-  FROM mrp_workorder wo
-  WHERE wo.state='done'
+  SELECT EXISTS (SELECT 1 FROM mo_sa_done) AND EXISTS (SELECT 1 FROM mo_fp_done)
+     AND NOT EXISTS (SELECT 1 FROM (SELECT id FROM mo_sa_done UNION ALL SELECT id FROM mo_fp_done) mo
+                     WHERE NOT EXISTS (SELECT 1 FROM mrp_workorder wo WHERE wo.production_id = mo.id AND wo.state='done')) AS ok
+),
+bom_requirements(product_code, component_code, quantity) AS (
+  VALUES ('FP-1000','SA-200',1), ('FP-1000','SC-300',1), ('FP-1000','RM-010',2),
+         ('SA-200','RM-020',1), ('SA-200','RM-030',1), ('SC-300','RM-040',1)
+),
+valid_boms AS (
+  SELECT bom.id, product.default_code AS product_code
+  FROM mrp_bom bom
+  JOIN product_template product ON product.id = bom.product_tmpl_id
+  WHERE bom.active AND bom.product_qty > 0
+    AND ((product.default_code IN ('FP-1000','SA-200') AND bom.type='normal')
+         OR (product.default_code='SC-300' AND bom.type='subcontract'))
+    AND NOT EXISTS (
+      SELECT 1 FROM bom_requirements req
+      WHERE req.product_code = product.default_code
+        AND ABS(COALESCE((SELECT SUM(line.product_qty) FROM mrp_bom_line line
+                          JOIN prod component ON component.product_id = line.product_id
+                          WHERE line.bom_id = bom.id AND component.default_code = req.component_code), 0)
+                - req.quantity * bom.product_qty) > 0.0001
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM mrp_bom_line line
+      LEFT JOIN prod component ON component.product_id = line.product_id
+      WHERE line.bom_id = bom.id AND NOT EXISTS (
+        SELECT 1 FROM bom_requirements req
+        WHERE req.product_code = product.default_code AND req.component_code = component.default_code
+      )
+    )
+),
+bom_evidence AS (
+  SELECT
+    EXISTS (SELECT 1 FROM valid_boms bom WHERE bom.product_code='FP-1000')
+      AND NOT EXISTS (SELECT 1 FROM mo_fp_done mo WHERE NOT EXISTS
+          (SELECT 1 FROM valid_boms bom WHERE bom.id = mo.bom_id AND bom.product_code='FP-1000')) AS fp,
+    EXISTS (SELECT 1 FROM valid_boms bom WHERE bom.product_code='SA-200')
+      AND NOT EXISTS (SELECT 1 FROM mo_sa_done mo WHERE NOT EXISTS
+          (SELECT 1 FROM valid_boms bom WHERE bom.id = mo.bom_id AND bom.product_code='SA-200')) AS sa,
+    EXISTS (SELECT 1 FROM valid_boms bom WHERE bom.product_code='SC-300') AS sc,
+    EXISTS (SELECT 1 FROM valid_boms bom
+            JOIN mrp_routing_workcenter operation ON operation.bom_id = bom.id
+            JOIN mrp_workcenter wc ON wc.id = operation.workcenter_id
+            WHERE bom.product_code='FP-1000' AND operation.name::text ILIKE '%Assembly%'
+              AND (NOT EXISTS (SELECT 1 FROM mo_fp_done) OR EXISTS (SELECT 1 FROM mo_fp_done mo WHERE mo.bom_id = bom.id))
+              AND ABS(operation.time_cycle_manual - 15) < 0.0001 AND ABS(wc.costs_hour - 40) < 0.01) AS assembly,
+    EXISTS (SELECT 1 FROM valid_boms bom
+            JOIN mrp_routing_workcenter operation ON operation.bom_id = bom.id
+            JOIN mrp_workcenter wc ON wc.id = operation.workcenter_id
+            WHERE bom.product_code='SA-200' AND operation.name::text ILIKE '%SMT%'
+              AND (NOT EXISTS (SELECT 1 FROM mo_sa_done) OR EXISTS (SELECT 1 FROM mo_sa_done mo WHERE mo.bom_id = bom.id))
+              AND ABS(operation.time_cycle_manual - 30) < 0.0001 AND ABS(wc.costs_hour - 60) < 0.01) AS smt
 ),
 paid_invoices AS (
-  SELECT ROUND(am.amount_total::numeric, 2) AS amount_total
+  SELECT ROUND(am.amount_total::numeric, 2) AS amount_total,
+         SUM(CASE WHEN p.default_code='FP-1000' THEN aml.quantity ELSE 0 END) AS fp_qty,
+         SUM(CASE WHEN p.default_code='ACC-900' THEN aml.quantity ELSE 0 END) AS acc_qty
   FROM account_move am
   JOIN eur ON eur.currency_id = am.currency_id
+  JOIN account_move_line aml ON aml.move_id = am.id
+  JOIN prod p ON p.product_id = aml.product_id
   WHERE am.move_type = 'out_invoice'
     AND am.state = 'posted'
     AND am.payment_state = 'paid'
-    AND (
-      COALESCE(am.ref,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.invoice_origin,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.narration,'') ILIKE '%{run_tag}%'
-    )
+    AND EXISTS (SELECT 1 FROM sale_order_line_invoice_rel rel
+                JOIN sale_order_line sol ON sol.id = rel.order_line_id
+                JOIN so ON so.id = sol.order_id
+                WHERE rel.invoice_line_id = aml.id)
+  GROUP BY am.id, am.amount_total
+),
+fp_shipments AS (
+  SELECT sp.id, sp.date_done, sp.backorder_id,
+         SUM(CASE WHEN lot.name='SSK-0001' THEN sml.{sml_qty_col} ELSE 0 END) AS ssk1,
+         SUM(CASE WHEN lot.name='SSK-0002' THEN sml.{sml_qty_col} ELSE 0 END) AS ssk2,
+         SUM(CASE WHEN lot.name='SSK-0003' THEN sml.{sml_qty_col} ELSE 0 END) AS ssk3,
+         SUM(sml.{sml_qty_col}) AS qty
+  FROM stock_move_line sml
+  JOIN stock_move sm ON sm.id = sml.move_id
+  JOIN stock_picking sp ON sp.id = sm.picking_id
+  JOIN stock_picking_type picking_type ON picking_type.id = sp.picking_type_id
+  JOIN stock_warehouse warehouse ON warehouse.id = picking_type.warehouse_id AND warehouse.code='My Co'
+  LEFT JOIN sale_order_line sol ON sol.id = sm.sale_line_id
+  JOIN so ON so.id = COALESCE(sol.order_id, sp.sale_id)
+  JOIN prod p ON p.product_id = sml.product_id
+  JOIN stock_lot lot ON lot.id = sml.lot_id AND lot.product_id = p.product_id
+  JOIN stock_location src ON src.id = sml.location_id
+  JOIN stock_location dest ON dest.id = sml.location_dest_id
+  WHERE sp.state='done' AND p.default_code='FP-1000'
+    AND src.usage='internal' AND dest.usage='customer'
+  GROUP BY sp.id, sp.date_done, sp.backorder_id
+),
+delivery_evidence AS (
+  SELECT EXISTS (
+    SELECT 1 FROM fp_shipments first, fp_shipments second
+    WHERE second.backorder_id = first.id AND first.date_done <= second.date_done
+      AND ABS(first.qty - 2) < 0.0001 AND ABS(first.ssk1 - 1) < 0.0001
+      AND ABS(first.ssk2 - 1) < 0.0001 AND ABS(first.ssk3) < 0.0001
+      AND ABS(second.qty - 1) < 0.0001 AND ABS(second.ssk3 - 1) < 0.0001
+      AND EXISTS (SELECT 1 FROM paid_invoices first_invoice, paid_invoices second_invoice
+                  WHERE ABS(first_invoice.amount_total - 460) < 0.01
+                    AND ABS(first_invoice.fp_qty - 2) < 0.0001 AND ABS(first_invoice.acc_qty - 2) < 0.0001
+                    AND ABS(second_invoice.amount_total - 230) < 0.01
+                    AND ABS(second_invoice.fp_qty - 1) < 0.0001 AND ABS(second_invoice.acc_qty - 1) < 0.0001)
+  ) AS ok
 ),
 paid_credit AS (
   SELECT ROUND(am.amount_total::numeric, 2) AS amount_total
   FROM account_move am
   JOIN eur ON eur.currency_id = am.currency_id
+  JOIN so ON COALESCE(am.invoice_origin,'') ILIKE '%' || so.name || '%'
+    OR EXISTS (SELECT 1 FROM account_move_line line
+               JOIN sale_order_line_invoice_rel rel ON rel.invoice_line_id = line.id
+               JOIN sale_order_line sol ON sol.id = rel.order_line_id
+               WHERE line.move_id = am.id AND sol.order_id = so.id)
   WHERE am.move_type = 'out_refund'
     AND am.state = 'posted'
     AND am.payment_state = 'paid'
-    AND (
-      COALESCE(am.ref,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.invoice_origin,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.narration,'') ILIKE '%{run_tag}%'
-    )
+    AND EXISTS (SELECT 1 FROM account_move_line line
+                JOIN prod p ON p.product_id = line.product_id
+                WHERE line.move_id = am.id AND p.default_code='FP-1000'
+                  AND ABS(line.quantity - 1) < 0.0001 AND ABS(line.price_subtotal - 200) < 0.01)
+    AND NOT EXISTS (SELECT 1 FROM account_move_line line
+                    JOIN product_product pp ON pp.id = line.product_id
+                    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                    WHERE line.move_id = am.id AND pt.default_code IS DISTINCT FROM 'FP-1000'
+                      AND line.price_subtotal <> 0)
 ),
-paid_vendor_bills AS (
-  SELECT COUNT(*) AS cnt
-  FROM account_move am
-  WHERE am.move_type='in_invoice'
-    AND am.state='posted'
-    AND am.payment_state='paid'
-    AND (
-      COALESCE(am.ref,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.invoice_origin,'') ILIKE '%{run_tag}%'
-      OR COALESCE(am.narration,'') ILIKE '%{run_tag}%'
-    )
+purchase_requirements(product_code, vendor_ref, currency_name, qty, price) AS (
+  VALUES ('RM-010','V-CN01','CNY',10,96), ('RM-020','V-CN01','CNY',10,64),
+         ('RM-030','V-US01','USD',3,20), ('RM-040','V-US02','USD',5,7),
+         ('SC-300','V-SUB01','USD',3,25), ('ACC-900','V-DS01','USD',3,10),
+         ('RM-030',NULL,NULL,1,NULL)
+),
+paid_purchase_requirements AS (
+  SELECT req.product_code, req.qty,
+    EXISTS (
+      SELECT 1 FROM purchase_order_line pol
+      JOIN purchase_order po ON po.id = pol.order_id
+      JOIN prod p ON p.product_id = pol.product_id
+      JOIN res_partner vendor ON vendor.id = po.partner_id
+      JOIN res_currency currency ON currency.id = po.currency_id
+      WHERE p.default_code = req.product_code AND (req.vendor_ref IS NULL OR vendor.ref = req.vendor_ref
+            OR vendor.name = req.vendor_ref OR vendor.name LIKE req.vendor_ref || ' %')
+        AND (req.currency_name IS NULL OR currency.name = req.currency_name) AND po.state IN ('purchase','done')
+        AND ABS(pol.{pol_qty_col} - req.qty) < 0.0001
+        AND (req.price IS NULL OR ABS(pol.price_unit - req.price) < 0.01)
+        AND (COALESCE(po.partner_ref,'') ILIKE '%{run_tag}%'
+             OR COALESCE(po.origin,'') ILIKE '%{run_tag}%'
+             OR COALESCE(po.name,'') ILIKE '%{run_tag}%')
+        AND (SELECT COALESCE(SUM(aml.quantity), 0) FROM account_move_line aml
+             JOIN account_move am ON am.id = aml.move_id
+             WHERE aml.purchase_line_id = pol.id AND am.move_type = 'in_invoice'
+               AND am.state = 'posted' AND am.payment_state = 'paid'
+               AND am.currency_id = po.currency_id AND ABS(aml.price_unit - pol.price_unit) < 0.01) >= req.qty - 0.0001
+    ) AS paid
+  FROM purchase_requirements req
 ),
 fp_lots AS (
   SELECT sl.name
@@ -728,17 +1020,34 @@ sc_lots AS (
   WHERE p.default_code='SC-300' AND sl.name IN ('CS-0001','CS-0002','CS-0003')
 ),
 subcontract_sc_done AS (
-  SELECT COUNT(DISTINCT sl.name) AS cnt
-  FROM stock_move_line sml
-  JOIN stock_picking sp ON sp.id = sml.picking_id
-  JOIN stock_lot sl ON sl.id = sml.lot_id
-  JOIN product_product pp ON pp.id = sml.product_id
-  JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE sp.state='done' AND pt.default_code='SC-300' AND sl.name IN ('CS-0001','CS-0002','CS-0003')
+  SELECT COUNT(*) AS cnt FROM (
+    SELECT sl.name
+    FROM stock_move_line sml
+    JOIN stock_move sm ON sm.id = sml.move_id
+    JOIN stock_picking sp ON sp.id = sm.picking_id
+    JOIN stock_picking_type picking_type ON picking_type.id = sp.picking_type_id
+    JOIN stock_location destination ON destination.id = sml.location_dest_id
+    JOIN stock_lot sl ON sl.id = sml.lot_id AND sl.product_id = sml.product_id
+    JOIN prod product ON product.product_id = sml.product_id AND product.default_code='SC-300'
+    JOIN purchase_order_line pol ON pol.id = sm.purchase_line_id AND pol.product_id = sml.product_id
+    JOIN purchase_order po ON po.id = pol.order_id
+    JOIN res_partner vendor ON vendor.id = po.partner_id
+      AND (vendor.ref='V-SUB01' OR vendor.name='V-SUB01' OR vendor.name LIKE 'V-SUB01 %')
+    WHERE sp.state='done' AND sm.state='done' AND picking_type.code='incoming'
+      AND destination.usage='internal' AND po.state IN ('purchase','done')
+      AND sl.name IN ('CS-0001','CS-0002','CS-0003')
+      AND (COALESCE(po.partner_ref,'') ILIKE '%{run_tag}%'
+           OR COALESCE(po.origin,'') ILIKE '%{run_tag}%'
+           OR COALESCE(po.name,'') ILIKE '%{run_tag}%')
+    GROUP BY sl.name
+    HAVING SUM(sml.{sml_qty_col}) >= 0.9999
+  ) received
 ),
 wh_base AS (
-  SELECT sw.id, sw.code, sw.lot_stock_id
+  SELECT sw.id, sw.code, sw.lot_stock_id, sw.wh_input_stock_loc_id,
+         sw.wh_pack_stock_loc_id, sw.wh_output_stock_loc_id, sw.reception_steps, sw.delivery_steps
   FROM stock_warehouse sw
+  JOIN stock_location location ON location.id = sw.lot_stock_id AND location.usage = 'internal'
   WHERE sw.code IN ('WH','My Co')
 ),
 wh_locs AS (
@@ -747,6 +1056,111 @@ wh_locs AS (
   JOIN stock_location loc
     ON loc.id = wb.lot_stock_id
     OR loc.parent_path LIKE CONCAT('%/', wb.lot_stock_id::text, '/%')
+),
+wh_received AS (
+  SELECT p.default_code AS product_code, SUM(line.{sml_qty_col}) AS qty
+  FROM stock_move_line line
+  JOIN stock_move move ON move.id = line.move_id AND move.state='done'
+  JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+  JOIN stock_picking_type kind ON kind.id = picking.picking_type_id AND kind.code='incoming'
+  JOIN stock_warehouse warehouse ON warehouse.id = kind.warehouse_id AND warehouse.code='WH'
+  JOIN stock_location source ON source.id = line.location_id AND source.usage='supplier'
+  JOIN stock_location destination ON destination.id = line.location_dest_id AND destination.usage='internal'
+    AND (destination.id = warehouse.wh_input_stock_loc_id
+         OR destination.parent_path LIKE CONCAT('%/', warehouse.wh_input_stock_loc_id, '/%'))
+  JOIN purchase_order_line pol ON pol.id = move.purchase_line_id AND pol.product_id = line.product_id
+  JOIN purchase_order po ON po.id = pol.order_id AND po.state IN ('purchase','done')
+  JOIN res_partner vendor ON vendor.id = po.partner_id
+    AND (vendor.ref='V-CN01' OR vendor.name='V-CN01' OR vendor.name LIKE 'V-CN01 %')
+  JOIN prod p ON p.product_id = line.product_id AND p.default_code IN ('RM-010','RM-020')
+  WHERE COALESCE(po.partner_ref,'') ILIKE '%{run_tag}%'
+     OR COALESCE(po.origin,'') ILIKE '%{run_tag}%'
+     OR COALESCE(po.name,'') ILIKE '%{run_tag}%'
+  GROUP BY p.default_code
+),
+wh_internal_flow AS (
+  SELECT p.default_code,
+    SUM(CASE WHEN (source.id = wh.wh_input_stock_loc_id OR source.parent_path LIKE CONCAT('%/', wh.wh_input_stock_loc_id, '/%'))
+                   AND (destination.id = wh.lot_stock_id OR destination.parent_path LIKE CONCAT('%/', wh.lot_stock_id, '/%'))
+             THEN line.{sml_qty_col} ELSE 0 END) AS putaway_qty,
+    SUM(CASE WHEN (source.id = wh.lot_stock_id OR source.parent_path LIKE CONCAT('%/', wh.lot_stock_id, '/%'))
+                   AND (destination.id = myco.lot_stock_id OR destination.parent_path LIKE CONCAT('%/', myco.lot_stock_id, '/%'))
+             THEN line.{sml_qty_col} ELSE 0 END) AS transfer_qty
+  FROM stock_move_line line
+  JOIN stock_move move ON move.id = line.move_id AND move.state='done'
+  JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+  JOIN stock_location source ON source.id = line.location_id
+  JOIN stock_location destination ON destination.id = line.location_dest_id
+  JOIN prod p ON p.product_id = line.product_id AND p.default_code IN ('RM-010','RM-020')
+  JOIN wh_base wh ON wh.code='WH'
+  JOIN wh_base myco ON myco.code='My Co'
+  GROUP BY p.default_code
+),
+wh_workflow AS (
+  SELECT COUNT(*) = 2 AND BOOL_AND(received.qty >= 9.9999 AND flow.putaway_qty >= 9.9999
+                                    AND flow.transfer_qty >= 9.9999) AS ok
+  FROM wh_received received JOIN wh_internal_flow flow ON flow.default_code = received.product_code
+),
+subcontract_supply AS (
+  SELECT EXISTS (
+    SELECT 1
+    FROM purchase_order po
+    JOIN res_partner vendor ON vendor.id = po.partner_id
+    JOIN purchase_order_line pol ON pol.order_id = po.id
+    JOIN prod contracted ON contracted.product_id = pol.product_id AND contracted.default_code='SC-300'
+    JOIN stock_move receipt ON receipt.purchase_line_id = pol.id AND receipt.state <> 'cancel'
+    JOIN wh_base myco ON myco.code='My Co'
+    WHERE po.state IN ('purchase','done')
+      AND (vendor.ref='V-SUB01' OR vendor.name='V-SUB01' OR vendor.name LIKE 'V-SUB01 %')
+      AND (COALESCE(po.partner_ref,'') ILIKE '%{run_tag}%'
+           OR COALESCE(po.origin,'') ILIKE '%{run_tag}%'
+           OR COALESCE(po.name,'') ILIKE '%{run_tag}%')
+      AND (SELECT COALESCE(SUM(line.{sml_qty_col}), 0)
+           FROM stock_move_line line
+           JOIN stock_move move ON move.id = line.move_id AND move.state='done'
+           JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+           JOIN stock_location source ON source.id = line.location_id
+           JOIN prod material ON material.product_id = line.product_id AND material.default_code='RM-040'
+           WHERE (source.id = myco.lot_stock_id OR source.parent_path LIKE CONCAT('%/', myco.lot_stock_id, '/%'))
+             AND (move.origin = po.name OR picking.origin = po.name
+                  OR COALESCE(move.origin,'') ILIKE '%{run_tag}%'
+                  OR COALESCE(picking.origin,'') ILIKE '%{run_tag}%')) >= 2.9999
+      AND (SELECT COALESCE(SUM(line.{sml_qty_col}), 0)
+           FROM stock_move_line line
+           JOIN stock_move move ON move.id = line.move_id AND move.state='done'
+           JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+           JOIN prod material ON material.product_id = line.product_id AND material.default_code='RM-040'
+           WHERE line.location_dest_id = receipt.location_id
+             AND (move.origin = po.name OR picking.origin = po.name
+                  OR COALESCE(move.origin,'') ILIKE '%{run_tag}%'
+                  OR COALESCE(picking.origin,'') ILIKE '%{run_tag}%')) >= 2.9999
+  ) AS ok
+),
+fp_handling AS (
+  SELECT COUNT(*) = 3 AND BOOL_AND(picked >= 0.9999 AND packed >= 0.9999) AS ok
+  FROM (
+    SELECT lot.name,
+      SUM(CASE WHEN (source.id = myco.lot_stock_id OR source.parent_path LIKE CONCAT('%/', myco.lot_stock_id, '/%'))
+                     AND (destination.id = myco.wh_pack_stock_loc_id OR destination.parent_path LIKE CONCAT('%/', myco.wh_pack_stock_loc_id, '/%'))
+               THEN line.{sml_qty_col} ELSE 0 END) AS picked,
+      SUM(CASE WHEN (source.id = myco.wh_pack_stock_loc_id OR source.parent_path LIKE CONCAT('%/', myco.wh_pack_stock_loc_id, '/%'))
+                     AND (destination.id = myco.wh_output_stock_loc_id OR destination.parent_path LIKE CONCAT('%/', myco.wh_output_stock_loc_id, '/%'))
+               THEN line.{sml_qty_col} ELSE 0 END) AS packed
+    FROM stock_move_line line
+    JOIN stock_move move ON move.id = line.move_id AND move.state='done'
+    JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+    LEFT JOIN sale_order_line sale_line ON sale_line.id = move.sale_line_id
+    JOIN so ON so.id = COALESCE(sale_line.order_id, picking.sale_id)
+      OR (sale_line.id IS NULL AND picking.sale_id IS NULL
+          AND (move.origin = so.name OR picking.origin = so.name))
+    JOIN prod product ON product.product_id = line.product_id AND product.default_code='FP-1000'
+    JOIN stock_lot lot ON lot.id = line.lot_id AND lot.product_id = line.product_id
+      AND lot.name IN ('SSK-0001','SSK-0002','SSK-0003')
+    JOIN stock_location source ON source.id = line.location_id
+    JOIN stock_location destination ON destination.id = line.location_dest_id
+    JOIN wh_base myco ON myco.code='My Co'
+    GROUP BY lot.name
+  ) handling
 ),
 wh_qty AS (
   SELECT wl.wh_code, p.default_code AS product_code, ROUND(SUM(sq.quantity)::numeric, 6) AS qty
@@ -760,8 +1174,24 @@ ssk2_wh AS (
   FROM stock_quant sq
   JOIN stock_lot sl ON sl.id = sq.lot_id
   JOIN wh_locs wl ON wl.location_id = sq.location_id
-  WHERE sl.name='SSK-0002'
+  JOIN prod p ON p.product_id = sl.product_id AND p.product_id = sq.product_id
+  WHERE sl.name='SSK-0002' AND p.default_code='FP-1000'
   GROUP BY wl.wh_code
+),
+ssk2_return AS (
+  SELECT EXISTS (
+    SELECT 1 FROM stock_move_line line
+    JOIN stock_move move ON move.id = line.move_id
+    JOIN stock_picking picking ON picking.id = move.picking_id AND picking.state='done'
+    LEFT JOIN stock_move original ON original.id = move.origin_returned_move_id
+    LEFT JOIN sale_order_line original_line ON original_line.id = original.sale_line_id
+    JOIN so ON original_line.order_id = so.id OR COALESCE(picking.origin,'') ILIKE '%{run_tag}%'
+    JOIN stock_location source ON source.id = line.location_id AND source.usage='customer'
+    JOIN stock_location destination ON destination.id = line.location_dest_id AND destination.usage='internal'
+    JOIN stock_lot lot ON lot.id = line.lot_id AND lot.name='SSK-0002'
+    JOIN prod p ON p.product_id = lot.product_id AND p.product_id = line.product_id AND p.default_code='FP-1000'
+    WHERE ABS(line.{sml_qty_col} - 1) < 0.0001
+  ) AS ok
 ),
 scrap_rm030 AS (
   SELECT COUNT(*) AS cnt
@@ -784,30 +1214,37 @@ extra_po_rm030 AS (
       OR COALESCE(po.name,'') ILIKE '%{run_tag}%'
     )
 ),
-  analytic_expense AS (
-  SELECT COUNT(*) AS cnt
-  FROM account_analytic_line aal
-  JOIN account_analytic_account aaa ON aaa.id = aal.account_id
-  WHERE aaa.name::text ILIKE '%AN-{run_tag}%'
-    AND aal.name::text ILIKE '%Travel to Berlin%'
-    AND ABS(aal.amount + 123.45) < 0.01
+analytic_expense AS (
+  {expense_sql}
 )
 SELECT json_build_object(
   'lc_split', (SELECT COALESCE(json_object_agg(default_code, add_cost), '{{}}'::json) FROM lc_split),
   'lc_bill_paid_cnt', (SELECT cnt FROM lc_bill_paid),
-  'so', (SELECT COALESCE(json_build_object('id', id, 'name', name, 'fp_qty', fp_qty, 'acc_qty', acc_qty, 'state', state), '{{}}'::json) FROM so),
-  'dropship_done_cnt', (SELECT COALESCE(SUM(cnt), 0) FROM dropship_done),
-  'mo_sa_done_cnt', (SELECT cnt FROM mo_sa_done),
-  'mo_fp_done_cnt', (SELECT cnt FROM mo_fp_done),
-  'workorders_done_cnt', (SELECT cnt FROM workorders_done),
-  'paid_invoices', (SELECT COALESCE(json_agg(amount_total ORDER BY amount_total), '[]'::json) FROM paid_invoices),
+  'so', (SELECT COALESCE(json_build_object('id', id, 'name', name, 'fp_qty', fp_qty, 'acc_qty', acc_qty, 'state', state,
+          'customer_ok', customer_ok, 'currency_name', currency_name, 'prices_ok', prices_ok), '{{}}'::json) FROM so),
+  'currency_configuration', (SELECT ok FROM fx_evidence),
+  'inventory_valuation', (SELECT ok FROM valuation_evidence),
+  'dropship_done_qty', (SELECT qty FROM dropship_done),
+  'mo_sa_done_qty', (SELECT COALESCE(SUM(product_qty), 0) FROM mo_sa_done),
+  'mo_fp_done_qty', (SELECT COALESCE(SUM(product_qty), 0) FROM mo_fp_done),
+  'workorders_done', (SELECT ok FROM workorders_done),
+  'boms', (SELECT row_to_json(bom_evidence) FROM bom_evidence),
+  'paid_invoices', (SELECT COALESCE(json_agg(json_build_object('amount', amount_total, 'fp_qty', fp_qty, 'acc_qty', acc_qty) ORDER BY amount_total), '[]'::json) FROM paid_invoices),
+  'partial_delivery_and_invoicing', (SELECT ok FROM delivery_evidence),
   'paid_credit', (SELECT COALESCE(json_agg(amount_total ORDER BY amount_total), '[]'::json) FROM paid_credit),
-  'paid_vendor_bills_cnt', (SELECT cnt FROM paid_vendor_bills),
+  'paid_purchase_requirements', (SELECT COALESCE(json_agg(json_build_object('product', product_code, 'qty', qty, 'paid', paid)), '[]'::json) FROM paid_purchase_requirements),
   'fp_lots', (SELECT COALESCE(json_agg(name ORDER BY name), '[]'::json) FROM fp_lots),
   'sc_lots', (SELECT COALESCE(json_agg(name ORDER BY name), '[]'::json) FROM sc_lots),
   'subcontract_sc_distinct_lots', (SELECT cnt FROM subcontract_sc_done),
+  'subcontract_supply', (SELECT ok FROM subcontract_supply),
+  'wh_received', (SELECT COALESCE(json_agg(json_build_object('product', product_code, 'qty', qty)), '[]'::json) FROM wh_received),
+  'wh_workflow', (SELECT ok FROM wh_workflow),
+  'fp_handling', (SELECT ok FROM fp_handling),
   'wh_qty', (SELECT COALESCE(json_agg(json_build_object('wh', wh_code, 'product', product_code, 'qty', qty) ORDER BY wh_code, product_code), '[]'::json) FROM wh_qty),
+  'warehouses', (SELECT COALESCE(json_agg(json_build_object('code', code, 'reception_steps', reception_steps, 'delivery_steps', delivery_steps)), '[]'::json) FROM wh_base),
+  'products', (SELECT COALESCE(json_agg(DISTINCT default_code), '[]'::json) FROM prod),
   'ssk2_wh', (SELECT COALESCE(json_agg(json_build_object('wh', wh_code, 'qty', qty) ORDER BY wh_code), '[]'::json) FROM ssk2_wh),
+  'ssk2_return', (SELECT ok FROM ssk2_return),
   'scrap_rm030_cnt', (SELECT cnt FROM scrap_rm030),
   'extra_po_rm030_cnt', (SELECT cnt FROM extra_po_rm030),
   'analytic_expense_cnt', (SELECT cnt FROM analytic_expense)
@@ -829,7 +1266,7 @@ SELECT json_build_object(
         report["checks"]["db_evidence_collected"] = False
         report["checks"]["db_evidence_error"] = str(exc)
         await _write_report(session, out_dir=out_dir, work_dir=work_dir, report=report)
-        return [0.0]
+        raise RuntimeError(f"Odoo database evidence query failed: {exc}") from exc
 
     def wh_map(wh_qty_rows):
         by_wh = {}
@@ -846,6 +1283,12 @@ SELECT json_build_object(
     sc_lots = set(report["evidence"].get("sc_lots") or [])
     so = report["evidence"].get("so") or {}
     by_wh = wh_map(report["evidence"].get("wh_qty") or [])
+    warehouses = {row.get("code"): row for row in (report["evidence"].get("warehouses") or []) if isinstance(row, dict)}
+    products = set(report["evidence"].get("products") or [])
+    boms = report["evidence"].get("boms") or {}
+    paid_requirements = report["evidence"].get("paid_purchase_requirements") or []
+    wh_received = {row.get("product"): float(row.get("qty", 0) or 0)
+                   for row in (report["evidence"].get("wh_received") or []) if isinstance(row, dict)}
     ssk2_map = {
         item.get("wh"): float(item.get("qty", 0) or 0)
         for item in (report["evidence"].get("ssk2_wh") or [])
@@ -855,32 +1298,53 @@ SELECT json_build_object(
     def wh_prod_qty(warehouse: str, product: str) -> float:
         return float(by_wh.get(warehouse, {}).get(product, 0) or 0)
 
+    def invoice_matches(amount: float, quantity: float) -> bool:
+        return any(isinstance(item, dict) and _float_eq(item.get("amount"), amount)
+                   and _float_eq(item.get("fp_qty"), quantity)
+                   and _float_eq(item.get("acc_qty"), quantity) for item in inv)
+
     checks = {
         "landed_cost_rm010_60": _float_eq(lc_split.get("RM-010", 0), 60.00),
         "landed_cost_rm020_40": _float_eq(lc_split.get("RM-020", 0), 40.00),
         "landed_cost_vendor_bill_paid": int(report["evidence"].get("lc_bill_paid_cnt", 0) or 0) >= 1,
-        "so_confirmed_exists": bool(so) and str(so.get("state", "")).lower() in ("sale", "done"),
-        "so_lines_fp3_acc3": bool(so) and _float_eq(so.get("fp_qty", 0), 3.0) and _float_eq(so.get("acc_qty", 0), 3.0),
-        "dropship_done_acc900_3": int(report["evidence"].get("dropship_done_cnt", 0) or 0) >= 1,
-        "mo_sa200_done_qty3": int(report["evidence"].get("mo_sa_done_cnt", 0) or 0) >= 1,
-        "mo_fp1000_done_qty3": int(report["evidence"].get("mo_fp_done_cnt", 0) or 0) >= 1,
-        "workorders_done_at_least2": int(report["evidence"].get("workorders_done_cnt", 0) or 0) >= 2,
-        "paid_invoice_460": any(_float_eq(item, 460.00) for item in inv),
-        "paid_invoice_230": any(_float_eq(item, 230.00) for item in inv),
+        "so_confirmed_exists": bool(so) and str(so.get("state", "")).lower() in ("sale", "done")
+        and so.get("customer_ok") is True and so.get("currency_name") == "EUR",
+        "so_lines_fp3_acc3": bool(so) and _float_eq(so.get("fp_qty", 0), 3.0)
+        and _float_eq(so.get("acc_qty", 0), 3.0) and so.get("prices_ok") is True,
+        "dropship_done_acc900_3": _float_eq(report["evidence"].get("dropship_done_qty"), 3.0),
+        "mo_sa200_done_qty3": _float_eq(report["evidence"].get("mo_sa_done_qty"), 3.0),
+        "mo_fp1000_done_qty3": _float_eq(report["evidence"].get("mo_fp_done_qty"), 3.0),
+        "workorders_done_at_least2": report["evidence"].get("workorders_done") is True,
+        "paid_invoice_460": invoice_matches(460.00, 2.0),
+        "paid_invoice_230": invoice_matches(230.00, 1.0),
         "paid_creditnote_200": any(_float_eq(item, 200.00) for item in credit),
-        "paid_vendor_bills_at_least6": int(report["evidence"].get("paid_vendor_bills_cnt", 0) or 0) >= 6,
+        "paid_vendor_bills_cover_purchases_and_freight": len(paid_requirements) == 7 and all(row.get("paid") is True for row in paid_requirements) and int(report["evidence"].get("lc_bill_paid_cnt", 0) or 0) >= 1,
         "fp_serials_all": fp_lots == {"SSK-0001", "SSK-0002", "SSK-0003"},
         "sc_serials_all": sc_lots == {"CS-0001", "CS-0002", "CS-0003"},
         "subcontract_sc300_received_3_serials": int(report["evidence"].get("subcontract_sc_distinct_lots", 0) or 0) >= 3,
+        "subcontract_rm040_resupplied": report["evidence"].get("subcontract_supply") is True,
         "scrap_rm030_qty1_done": int(report["evidence"].get("scrap_rm030_cnt", 0) or 0) >= 1,
         "extra_po_rm030_qty1_exists": int(report["evidence"].get("extra_po_rm030_cnt", 0) or 0) >= 1,
         "analytic_expense_travel_12345": int(report["evidence"].get("analytic_expense_cnt", 0) or 0) >= 1,
-        "WH_RM010_zero": _float_eq(wh_prod_qty("WH", "RM-010"), 0.0),
-        "WH_RM020_zero": _float_eq(wh_prod_qty("WH", "RM-020"), 0.0),
+        "WH_RM010_zero": "WH" in warehouses and "RM-010" in products and wh_received.get("RM-010", 0) >= 9.9999 and _float_eq(wh_prod_qty("WH", "RM-010"), 0.0),
+        "WH_RM020_zero": "WH" in warehouses and "RM-020" in products and wh_received.get("RM-020", 0) >= 9.9999 and _float_eq(wh_prod_qty("WH", "RM-020"), 0.0),
         "MyCo_RM010_4": _float_eq(wh_prod_qty("My Co", "RM-010"), 4.0),
         "MyCo_RM020_7": _float_eq(wh_prod_qty("My Co", "RM-020"), 7.0),
-        "SSK0002_in_MyCo": float(ssk2_map.get("My Co", 0) or 0) >= 0.99,
-        "SSK0002_not_in_WH": _float_eq(float(ssk2_map.get("WH", 0) or 0), 0.0),
+        "SSK0002_in_MyCo": report["evidence"].get("ssk2_return") is True and float(ssk2_map.get("My Co", 0) or 0) >= 0.99,
+        "SSK0002_not_in_WH": "WH" in warehouses and "SSK-0002" in fp_lots and report["evidence"].get("ssk2_return") is True
+        and float(ssk2_map.get("My Co", 0) or 0) >= 0.99 and _float_eq(float(ssk2_map.get("WH", 0) or 0), 0.0),
+        "WH_two_step_receipts": warehouses.get("WH", {}).get("reception_steps") == "two_steps",
+        "MyCo_three_step_delivery": warehouses.get("My Co", {}).get("delivery_steps") == "pick_pack_ship",
+        "wh_receipt_and_transfer_completed": report["evidence"].get("wh_workflow") is True,
+        "fp_pick_and_pack_completed": report["evidence"].get("fp_handling") is True,
+        "fp_bom": boms.get("fp") is True,
+        "sa_bom": boms.get("sa") is True,
+        "subcontract_bom": boms.get("sc") is True,
+        "assembly_operation": boms.get("assembly") is True,
+        "smt_operation": boms.get("smt") is True,
+        "partial_delivery_and_invoicing": report["evidence"].get("partial_delivery_and_invoicing") is True,
+        "currency_configuration": report["evidence"].get("currency_configuration") is True,
+        "fifo_automated_valuation": report["evidence"].get("inventory_valuation") is True,
     }
 
     report["score_items"] = [{"name": name, "passed": bool(passed), "weight": 1.0} for name, passed in checks.items()]

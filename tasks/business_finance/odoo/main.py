@@ -7,11 +7,7 @@ from tasks.common_setup import BaseTaskSetup
 
 
 class _OdooSetup(BaseTaskSetup):
-    """Per-run Postgres DB reset from template + admin credential reset.
-
-    Shape B: DB state mutates across runs; Stage 1 cannot keep the DB
-    clean and the agent has no Postgres admin access.
-    """
+    """Per-run Postgres DB reset and admin credential setup."""
 
     async def setup(self, task_cfg, session: cb.DesktopSession) -> None:
         await start_variant_task(task_cfg, session)
