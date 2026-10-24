@@ -20,7 +20,7 @@ Phase mapping (refined from simprun, surface renamed to LOG_SPEC events):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
 import json
 import logging
 import signal
@@ -213,6 +213,7 @@ async def run_one_unit(
     trajectory: Trajectory | None = None
     run_result: AgentRunResult | None = None
     executor: BaseExecutor | None = None
+    host_artifacts_dir: Path | None = None
 
     status = "completed"
     score: float | None = None
@@ -309,6 +310,7 @@ async def run_one_unit(
             agent_name = getattr(config, "name", "agent")
             host_artifacts_dir = writer.run_dir / "origin_log" / agent_name
             host_artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (host_artifacts_dir / "_cli_identity.json").unlink(missing_ok=True)
             executor = _build_executor(
                 executor_type=executor_type,
                 env=env,
@@ -682,6 +684,19 @@ async def run_one_unit(
         error=eval_error,
     )
 
+    cli_identity: dict[str, Any] = {}
+    if host_artifacts_dir is not None:
+        try:
+            loaded = json.loads((host_artifacts_dir / "_cli_identity.json").read_text())
+            if isinstance(loaded, dict):
+                version = loaded.get("cli_version")
+                source = loaded.get("source")
+                cli_identity = {
+                    "cli_version": version if isinstance(version, str) else None,
+                    "source": source if isinstance(source, str) and source in {"official", "fork", "custom"} else None,
+                }
+        except (OSError, ValueError):
+            pass
     run_meta = _build_run_meta(
         run_id=writer.run_id,
         unit=unit,
@@ -697,6 +712,7 @@ async def run_one_unit(
         category=_category_from_error(error_str),
         task_revision_value=task_revision_value,
         environment=environment_metadata,
+        cli_identity=cli_identity,
     )
     writer.write_run_json(run_meta)
 
@@ -1183,6 +1199,7 @@ def _build_run_meta(
     category: str | None,
     task_revision_value: str | None = None,
     environment: dict[str, Any] | None = None,
+    cli_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Construct the LOG_SPEC §4 run.json payload."""
     usage = (
@@ -1190,7 +1207,7 @@ def _build_run_meta(
         if trajectory is not None and trajectory.final_metrics is not None
         else None
     )
-    cfg_repr = redact_config(dict(unit.agent_spec.config))
+    cfg_repr = redact_config(asdict(config) if is_dataclass(config) else dict(unit.agent_spec.config))
     return {
         "schema_version": 2,
         "run_id": run_id,
@@ -1200,6 +1217,7 @@ def _build_run_meta(
             "class": unit.agent_spec.class_,
             "name": getattr(config, "name", unit.agent_spec.class_),
             "version": getattr(config, "cli_version", None),
+            "cli_identity": cli_identity or {"cli_version": None, "source": None},
             "model": config.model,
             "executor": executor_type,
             "config_repr": cfg_repr,

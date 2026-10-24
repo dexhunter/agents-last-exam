@@ -63,7 +63,7 @@ def _command_version(path: str, timeout: int = 60) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = _VERSION_RE.search((result.stdout or "") + (result.stderr or ""))
-    return match.group(1) if match else None
+    return match.group(1) if result.returncode == 0 and match else None
 
 
 def _node_version(path: str) -> tuple[int, int, int] | None:
@@ -196,6 +196,10 @@ class KimiCodeDeployer(BaseAgentDeployer):
                 )
 
         self._kimi_path = kimi_path
+        self.actual_cli_version = installed
+        self.cli_source = (
+            "official" if (config.cli_version or "").startswith("@moonshot-ai/kimi-code") else "custom"
+        )
         self._kimi_command = _launch_command(kimi_path, node_path, node_modules)
         self._otel_bootstrap_path: Path | None = None
         if config.otel_enabled:
@@ -263,13 +267,7 @@ class KimiCodeDeployer(BaseAgentDeployer):
             with transcript_file.open("wb") as stdout, stderr_file.open("wb") as stderr:
                 process = await asyncio.to_thread(
                     subprocess.Popen,
-                    [
-                        *self._kimi_command,
-                        "--prompt",
-                        prompt,
-                        "--output-format",
-                        "stream-json",
-                    ],
+                    self._build_argv(prompt),
                     stdin=subprocess.DEVNULL,
                     stdout=stdout,
                     stderr=stderr,
@@ -304,6 +302,9 @@ class KimiCodeDeployer(BaseAgentDeployer):
             if status == "completed"
             else self._diagnose_failure(transcript_file, stderr_file, process.returncode),
         )
+
+    def _build_argv(self, prompt: str) -> list[str]:
+        return [*self._kimi_command, "--prompt", prompt, "--output-format", "stream-json"]
 
     def _build_env(
         self,

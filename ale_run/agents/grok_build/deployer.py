@@ -72,6 +72,8 @@ def _node_version(node_path: str) -> tuple[int, int, int] | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+    if probe.returncode != 0:
+        return None
     match = _VERSION_RE.search((probe.stdout or "") + (probe.stderr or ""))
     if not match:
         return None
@@ -122,6 +124,8 @@ def _installed_binary_version(grok_path: Path) -> str | None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if probe.returncode != 0:
         return None
     match = _VERSION_RE.search((probe.stdout or "") + (probe.stderr or ""))
     return match.group(1) if match else None
@@ -196,7 +200,7 @@ class GrokBuildDeployer(BaseAgentDeployer):
             if grok_path is not None
             else None
         )
-        if grok_path is None or (
+        if grok_path is None or installed_binary is None or (
             expected is not None and (installed_package != expected or installed_binary != expected)
         ):
             logger.info(
@@ -249,6 +253,8 @@ class GrokBuildDeployer(BaseAgentDeployer):
             raise RuntimeError(
                 f"grok_build: official binary missing under {grok_install_home / 'bin'}"
             )
+        if installed_binary is None:
+            raise RuntimeError(f"grok_build: cannot determine version of {grok_path}")
         if expected is not None and (installed_package != expected or installed_binary != expected):
             raise RuntimeError(
                 "grok_build: post-install version mismatch "
@@ -258,6 +264,8 @@ class GrokBuildDeployer(BaseAgentDeployer):
 
         self._grok_path = str(grok_path)
         self._node_path = node_path
+        self.actual_cli_version = installed_binary
+        self.cli_source = "official"
         logger.info(
             "grok_build: CLI ready at %s (version %s, node %s)",
             grok_path,

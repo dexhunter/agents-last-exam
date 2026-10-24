@@ -1,6 +1,6 @@
 # droid — Factory.ai `droid` CLI (closed-source binary), run headless on the sandbox.
-# Auth: FACTORY_API_KEY sentinel (byok-noop) satisfies the CLI's auth gate; actual
-# model calls route via OpenRouter using OPENROUTER_API_KEY (BYOK customModels entry).
+# Auth: FACTORY_API_KEY or an authenticated Factory session; model calls use
+# OPENROUTER_API_KEY (or config.api_key) for the BYOK customModels entry.
 #
 # Consolidated preset; `model:` is an example, every `config:` key is the
 # dataclass default (ale_run/agents/droid/config.py).
@@ -13,6 +13,7 @@ harness: droid
 model: anthropic/claude-opus-4.7
 
 config:
+  cli_version: "0.244.0"
   # Routing. "openrouter" is the only route the deployer implements (BYOK
   # customModels → openrouter.ai/api/v1 + OPENROUTER_API_KEY).
   provider: openrouter

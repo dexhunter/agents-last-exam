@@ -22,7 +22,7 @@ integrations and interactive helpers that block headless runs.
 
 Distribution: pre-built binary downloaded by the official Factory.ai
 installer. No npm package, no source repo, no fork. The deployer
-auto-installs the binary if not pre-baked in the sandbox image.
+installs the configured version if the existing binary is missing or mismatched.
 
 | | Path |
 |---|---|
@@ -33,7 +33,7 @@ auto-installs the binary if not pre-baked in the sandbox image.
 | Sessions | `~/.factory/sessions/<cwd-encoded>/<sid>.jsonl` |
 | Logs | `~/.factory/logs/{droid-log-single.log,console.log}` |
 
-Pinned version: `0.116.0`.
+Pinned version: `0.244.0`.
 
 ## Provider — OpenRouter BYOK
 
@@ -41,21 +41,14 @@ The deployer writes a single `customModels` entry into
 `~/.factory/settings.json` pointing at `https://openrouter.ai/api/v1`.
 The Factory.ai direct path is not shipped.
 
-Auth bypass: `FACTORY_API_KEY=byok-noop` satisfies the CLI's auth gate.
-The check logs a WARN and continues with the BYOK path.
+The CLI also needs a valid `FACTORY_API_KEY` or an authenticated Factory
+session. This is separate from the model provider's API key.
 
 ## Install
 
-The deployer auto-installs if `droid` is not on PATH:
-
-1. Tries the official installer: `curl -fsSL https://app.factory.ai/cli | sh`
-2. Falls back to pinned direct download:
-   `curl -fsSL "https://downloads.factory.ai/factory-cli/releases/0.116.0/linux/x64/droid" -o ~/.local/bin/droid`
-
-The installer drops `~/.local/bin/droid` (147 MB binary) and a bundled
-ripgrep at `~/.factory/bin/rg`. `xdg-utils` is a required dependency
-for the official installer (the pinned download fallback works without
-it).
+The deployer downloads the exact configured release from
+`https://downloads.factory.ai/factory-cli/releases/<version>/linux/x64/droid`
+and verifies its version after installation.
 
 ## Config
 
@@ -64,7 +57,7 @@ agent:
   harness: droid
   model: anthropic/claude-sonnet-4-6
   config:
-    timeout_s: 1800
+    cli_version: "0.244.0"
     reasoning_effort: medium
     skip_permissions_unsafe: true
     max_output_tokens: 128000
@@ -75,10 +68,10 @@ agent:
 |---|---|
 | `model` | OpenRouter model slug; written into `customModels[0].model` and passed to `-m` |
 | `reasoning_effort` | `off\|none\|low\|medium\|high` — passed via `--reasoning-effort` |
-| `skip_permissions_unsafe` | `true` (default) → `--skip-permissions-unsafe`; `false` → `--auto high` |
+| `skip_permissions_unsafe` | `true` (default) → `--skip-permissions-unsafe`; `false` leaves the CLI permission default |
 | `max_output_tokens` | Written into `customModels[0].maxOutputTokens` |
 | `byok_provider` | Written into `customModels[0].provider`. Use `generic-chat-completion-api` for OpenRouter |
-| `disabled_tools` | CSV of droid tool names passed to `--disabled-tools` |
+| `disabled_tools` | List of droid tool names passed to `--disabled-tools` |
 
 ## Bridge
 
@@ -113,9 +106,8 @@ pointing at the CUA MCP server (same bridge as claude_code, cursor_cli):
 ## Execution
 
 `launch()` writes the prompt to a file and spawns `droid exec` as a
-child process with stdout/stderr captured. Polled every 2s; killed at
-the `timeout_s` deadline. `FACTORY_API_KEY=byok-noop` is injected into
-the environment.
+child process with stdout/stderr captured. The experiment's wall-time budget
+controls the deadline. The Factory credential is passed through unchanged.
 
 ## Layout
 

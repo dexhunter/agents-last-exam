@@ -80,4 +80,4 @@ config:
 
   # Pinned npm spec — the deployer probes `claude --version` and (re)installs
   # when the installed version mismatches the version encoded here.
-  cli_version: "@anthropic-ai/claude-code@2.1.170"
+  cli_version: "@anthropic-ai/claude-code@2.1.280"

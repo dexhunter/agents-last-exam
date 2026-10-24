@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from ale_run.agents.antigravity_cli.config import AntigravityCliConfig
 from ale_run.agents.antigravity_cli.deployer import (
@@ -28,6 +29,12 @@ def _result() -> AgentRunResult:
         transcript_path="transcript.jsonl",
         duration_s=1.25,
     )
+
+
+def test_preset_uses_default_model() -> None:
+    preset_path = Path(__file__).resolve().parents[2] / "configs/agents/antigravity_cli.yaml"
+    preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    assert preset["model"] == AntigravityCliConfig().model == "Gemini 3.8 Flash (High)"
 
 
 def test_parse_json_envelope_records_response_and_usage(tmp_path: Path) -> None:
@@ -241,7 +248,7 @@ def test_parse_stream_json_builds_metrics_summary(tmp_path: Path) -> None:
 
     AntigravityCliDeployer.parse_artifacts(
         work_dir=tmp_path,
-        config=AntigravityCliConfig(),
+        config=AntigravityCliConfig(model="Gemini 3.7 Flash (High)"),
         run_result=_result(),
         builder=builder,
     )
@@ -393,7 +400,7 @@ def test_pinned_release_does_not_depend_on_latest_manifest() -> None:
         ("failed", "success", "failed"),
         ("completed", "timeout", "timeout"),
         ("timeout", "success", "timeout"),
-        ("timeout", "failed", "timeout"),
+        ("timeout", "failed", "failed"),
         ("failed", "timeout", "failed"),
     ],
 )
@@ -421,7 +428,7 @@ def test_run_metadata_records_cli_version() -> None:
     metadata = _build_run_meta(
         run_id="run-1",
         unit=unit,
-        config=AntigravityCliConfig(),
+        config=AntigravityCliConfig(cli_version="1.1.25"),
         executor_type="sandbox",
         status="completed",
         score=1.0,

@@ -7,7 +7,7 @@
 - Install: official installer `https://antigravity.google/cli/install.sh` drops
   `~/.local/bin/agy`. Pinnable tarball via the updater manifest
   (`.../manifests/linux_amd64.json` → `storage.googleapis.com/antigravity-public/...`).
-  The current ALE pin is `1.1.25`; its official URL and checksum are retained in
+  The current ALE pin is `1.4.1`; its official URL and checksum are retained in
   the deployer so a newer latest-only manifest does not break reproducible installs.
 - Auth: this integration uses Google OAuth via the host-login → token-file →
   in-sandbox-injection flow. `agy` also supports Gemini API keys; OpenRouter's
@@ -32,7 +32,7 @@ agy --print="<prompt>" --model "<display name>" --output-format stream-json \
 ```
 
 - `--model` takes the `agy models` display names verbatim (e.g.
-  `Gemini 3.7 Flash (High)`, `Claude Sonnet 4.6 (Thinking)`, `GPT-OSS 120B (Medium)`).
+  `Gemini 3.8 Flash (High)`, `Claude Sonnet 5.5 (High)`, `GPT-OSS 120B (Medium)`).
 - Streaming JSON supplies per-generation usage, per-tool duration, and the final
   response in `transcript.jsonl`. ALE normalizes it into ATIF and one
   `metrics_summary.json` artifact whose `api_calls` shape matches the Codex and

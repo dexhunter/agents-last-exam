@@ -32,3 +32,14 @@ def test_redact_config_preserves_non_string_nested_keys() -> None:
         "parameters": {1: "safe", 2: {"api_key": "***cret"}, None: "unset"},
     }
     assert config["parameters"][2]["api_key"] == "nested-secret"
+
+
+def test_redact_config_redacts_camel_case_and_auth_headers() -> None:
+    config = {
+        "headers": {"clientSecret": "secret-value", "X-Custom-Auth": "secret-value"},
+        "extra_envs": {"AUTH_HEADER": "secret-value", "MODE": "safe"},
+    }
+    assert redact_config(config) == {
+        "headers": {"clientSecret": "***alue", "X-Custom-Auth": "***alue"},
+        "extra_envs": {"AUTH_HEADER": "***alue", "MODE": "safe"},
+    }

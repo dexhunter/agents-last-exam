@@ -223,6 +223,10 @@ are not complete. Missing or changed hashes rerun; see the
 Failed units retry up to `max_attempts`. Use `--disable-resume` to run every
 selected unit once without retries.
 
+`run.json` includes the expanded, redacted agent config and, when available,
+`agent.cli_identity` with the probed CLI version and selected source. Unknown
+values are `null`. Resume checks the task revision, not CLI identity.
+
 ## Cleanup and recovery
 
 The provider deletes each VM when `cleanup_mode: delete`. After an abrupt host

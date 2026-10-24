@@ -28,14 +28,16 @@ class ForgecodeConfig:
     # (direct variant forgecode.yaml uses anthropic/claude-sonnet-4).
     model: str = "anthropic/claude-sonnet-4.6"
 
-    forge_version: str = "2.13.0"
+    cli_version: str = "2.14.0"
     """Pinned forge release tag (without the ``v`` prefix). The deployer
-    downloads ``releases/download/v<forge_version>/forge-...-musl`` instead
+    downloads ``releases/download/v<cli_version>/forge-...-musl`` instead
     of ``releases/latest`` so every environment converges on one binary.
     Pinning matters because forge's agent mode (``-p``) otherwise
     self-updates to the latest release on startup — see
     :meth:`render_forge_toml`'s ``[updates]`` block, which also disables that
-    self-update at runtime. 2.13.0 is the validated-working version."""
+    self-update at runtime."""
+    forge_version: str | None = None
+    """Legacy alias for existing configurations."""
 
     # Sampling / model knobs surfaced through forge.toml.
     # agenthle: temperature 0.7 (both openrouter + direct).
@@ -53,6 +55,10 @@ class ForgecodeConfig:
     # OPENROUTER_API_KEY.
     provider: str = "openrouter"
     """``"openrouter"`` or ``"direct"``."""
+
+    def __post_init__(self) -> None:
+        if self.forge_version is not None:
+            self.cli_version = self.forge_version
 
     @property
     def is_openrouter(self) -> bool:

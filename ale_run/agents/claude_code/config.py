@@ -92,6 +92,8 @@ class ClaudeCodeConfig:
 
     # ---- CLI knobs ----
     max_budget_usd: float | None = None
+    context_window: int | None = None
+    auto_compact_token_limit: int | None = None
     max_output_tokens: int | None = None
     """Maximum output tokens requested from the model through Claude Code's
     ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` environment variable. ``None`` leaves the
@@ -146,8 +148,14 @@ class ClaudeCodeConfig:
     is left to the model's adaptive default."""
 
     # ---- documentation ----
-    cli_version: str = "@anthropic-ai/claude-code@2.1.170"
+    cli_version: str = "@anthropic-ai/claude-code@2.1.280"
     """Full npm spec of the pinned CLI. The deployer probes the installed
     ``claude --version`` against the version encoded here and (re)installs
     via npm when missing or mismatched — so bumping this is sufficient to
     upgrade images with an older claude pre-baked."""
+
+    def __post_init__(self) -> None:
+        if self.context_window is not None and self.context_window <= 0:
+            raise ValueError("context_window must be positive")
+        if self.auto_compact_token_limit is not None and self.auto_compact_token_limit <= 0:
+            raise ValueError("auto_compact_token_limit must be positive")

@@ -47,14 +47,19 @@ class CursorCliConfig:
     supported, so this is fixed to ``"cursor"`` (matching agenthle's
     cursor_cli config). The deployer does not branch on it; it exists for
     parity and to make the unsupported-routing fact explicit."""
-    cursor_version: str = "2026.05.28-a70ca7c"
+    cli_version: str = "2026.10.16-e3cb207"
     """Pinned cursor-agent version (Cursor's date-hash scheme). The
     deployer verifies any pre-installed binary matches this and otherwise
     installs it from
     ``https://downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz``
-    so all environments converge on one version. ``cursor.com/install``
-    is latest-only and cannot pin, so it is used only as a fallback."""
+    so all environments converge on one version."""
+    cursor_version: str | None = None
+    """Legacy alias retained for existing experiment configurations."""
     disabled_tools: tuple[str, ...] = ()
     """Permission deny patterns for ``cli-config.json``.
     Supports: ``Shell(...)``, ``Read(...)``, ``Write(...)``,
     ``WebFetch(...)``, ``Mcp(server, tool)``."""
+
+    def __post_init__(self) -> None:
+        if self.cursor_version is not None:
+            self.cli_version = self.cursor_version

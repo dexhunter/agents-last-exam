@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -69,7 +70,7 @@ class ZCodeDeployer(BaseAgentDeployer):
     @property
     def version(self) -> str | None:
         cfg: ZCodeConfig = self.config  # type: ignore[assignment]
-        return f"src:{getattr(self, '_resolved_ref', cfg.cli_ref)}"
+        return f"src:{getattr(self, '_resolved_ref', cfg.cli_version)}"
 
     async def install(self) -> None:
         cfg: ZCodeConfig = self.config  # type: ignore[assignment]
@@ -112,29 +113,32 @@ class ZCodeDeployer(BaseAgentDeployer):
         pnpm = await self._ensure_pnpm(npm)
 
         repo_dir = Path(os.path.expanduser("~")) / ".zcode_build" / "ZCode"
-        t0 = time.monotonic()
-        await self._clone_or_update(repo_dir, cfg.cli_ref)
-        clone_s = time.monotonic() - t0
-
-        t0 = time.monotonic()
-        await self._pnpm_install(pnpm, repo_dir)
-        install_s = time.monotonic() - t0
-
-        t0 = time.monotonic()
-        await self._pnpm_build(pnpm, repo_dir)
-        build_s = time.monotonic() - t0
+        if await self._cached_build_matches(repo_dir, cfg.cli_version):
+            self._resolved_ref = cfg.cli_version
+            logger.info("zcode: reusing verified build at %s", self._resolved_ref)
+        else:
+            await self._clone_or_update(repo_dir, cfg.cli_version)
+            resolved = getattr(self, "_resolved_ref", None)
+            if resolved:
+                await self._verify_source(repo_dir, resolved)
+            await self._pnpm_install(pnpm, repo_dir)
+            await self._pnpm_build(pnpm, repo_dir)
+            if resolved:
+                await self._verify_source(repo_dir, resolved)
+            identity = await self._build_identity(repo_dir, getattr(self, "_resolved_ref", ""))
+            if identity is not None:
+                try:
+                    self._build_identity_path(repo_dir).write_text(json.dumps(identity), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("zcode: could not cache build identity: %s", exc)
 
         cli_path = repo_dir / _CLI_DIST_RELPATH
         if not cli_path.is_file():
             raise RuntimeError(f"zcode: build finished but {cli_path} does not exist")
         self._cli_path = cli_path
-        logger.info(
-            "zcode: built %s (clone=%.0fs install=%.0fs build=%.0fs)",
-            cli_path,
-            clone_s,
-            install_s,
-            build_s,
-        )
+        self.actual_cli_version = getattr(self, "_resolved_ref", None)
+        self.cli_source = "official"
+        logger.info("zcode: CLI ready at %s (revision %s)", cli_path, self.actual_cli_version)
 
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)
@@ -165,6 +169,52 @@ class ZCodeDeployer(BaseAgentDeployer):
             cfg.model,
             cfg.base_url,
         )
+
+    @staticmethod
+    def _build_identity_path(repo_dir: Path) -> Path:
+        return repo_dir.parent / "zcode-build-identity.json"
+
+    async def _verify_source(self, repo_dir: Path, ref: str) -> None:
+        head = await self._run_command(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], timeout=30)
+        if head.returncode or head.stdout.strip() != ref:
+            raise RuntimeError("zcode: source revision changed during installation")
+        clean = await self._run_command(["git", "-C", str(repo_dir), "diff", "--quiet", "HEAD", "--"], timeout=30)
+        if clean.returncode:
+            raise RuntimeError("zcode: source has modified tracked files or cannot be checked")
+
+    async def _build_identity(self, repo_dir: Path, ref: str) -> dict | None:
+        if not re.fullmatch(r"[0-9a-f]{40}", ref):
+            return None
+        cli = repo_dir / _CLI_DIST_RELPATH
+        builtin = cli.parent / "provider/zcode-builtin.json"
+        if not (repo_dir / ".git").is_dir() or not (repo_dir / "node_modules/.modules.yaml").is_file():
+            return None
+        try:
+            head = await self._run_command(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], timeout=30)
+            clean = await self._run_command(["git", "-C", str(repo_dir), "diff", "--quiet", "HEAD", "--"], timeout=30)
+            node = await self._run_command([self._node_path, "--version"], timeout=30)
+            version = await self._run_command([self._node_path, str(cli), "version"], timeout=30)
+            if (head.returncode or head.stdout.strip() != ref or clean.returncode
+                    or node.returncode or version.returncode or not version.stdout.strip()):
+                return None
+            with cli.open("rb") as cli_stream, builtin.open("rb") as builtin_stream:
+                return {
+                    "revision": ref,
+                    "node_version": node.stdout.strip(),
+                    "cli_version": version.stdout.strip(),
+                    "cli_sha256": hashlib.file_digest(cli_stream, "sha256").hexdigest(),
+                    "builtin_sha256": hashlib.file_digest(builtin_stream, "sha256").hexdigest(),
+                }
+        except (OSError, subprocess.SubprocessError, TimeoutError):
+            return None
+
+    async def _cached_build_matches(self, repo_dir: Path, ref: str) -> bool:
+        try:
+            recorded = json.loads(self._build_identity_path(repo_dir).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        current = await self._build_identity(repo_dir, ref)
+        return current is not None and current == recorded
 
     async def _ensure_pnpm(self, npm: str) -> str:
         if not self.executor.sandbox.is_linux:
@@ -261,7 +311,7 @@ class ZCodeDeployer(BaseAgentDeployer):
         ):
             result = await self._run_command(command, timeout=300)
             if result.returncode:
-                raise RuntimeError("zcode: could not resolve requested cli_ref")
+                raise RuntimeError("zcode: could not resolve requested cli_version")
         result = await self._run_command(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"], timeout=30
         )

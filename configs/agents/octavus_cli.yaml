@@ -63,7 +63,7 @@ config:
 
   # npm spec installed globally at setup. Pin for reproducibility; null => latest.
   # >=1.0.10 is required for the per-run `thinking:` override above.
-  cli_version: "@octavus/agent@1.0.10"
+  cli_version: "@octavus/agent@1.0.32"
 
   # Best-effort apt-get of the display/accessibility stack (Xvfb, AT-SPI + its
   # python bindings, xdotool, scrot, Chrome libs) unless the box already has both

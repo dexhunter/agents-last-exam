@@ -42,7 +42,7 @@ def test_config_matches_tested_k3_settings() -> None:
     assert config.max_context_size == 1_048_576
     assert config.thinking_effort == "max"
     assert config.otel_enabled is True
-    assert config.cli_version == "@moonshot-ai/kimi-code@0.27.0"
+    assert config.cli_version == "@moonshot-ai/kimi-code@2.2.0"
 
 
 def test_expected_version_parses_scoped_npm_spec() -> None:

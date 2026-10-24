@@ -180,6 +180,15 @@ class OctavusCliDeployer(BaseAgentDeployer):
     # install
     # =========================================================================
 
+    @staticmethod
+    def _installed_version(path: str) -> str | None:
+        try:
+            probe = subprocess.run([path, "version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.search(r"\boctoagent\s+(\d+\.\d+\.\d+)\b", probe.stdout or "")
+        return match.group(1) if probe.returncode == 0 and match else None
+
     async def install(self) -> None:
         cfg: OctavusCliConfig = self.config  # type: ignore[assignment]
 
@@ -190,24 +199,35 @@ class OctavusCliDeployer(BaseAgentDeployer):
             await self._ensure_computer_prereqs()
 
         pkg = cfg.cli_version or "@octavus/agent"
-        env = {**os.environ, "npm_config_cache": os.path.join(os.path.expanduser("~"), ".npm-ale")}
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            [npm, "install", "-g", "--force", pkg],
-            capture_output=True, text=True, timeout=600, env=env,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"octavus_cli: npm install -g {pkg} failed "
-                f"(rc={proc.returncode}): {(proc.stderr or '')[-500:]}"
-            )
-
+        match = re.fullmatch(r"@octavus/agent@(\d+\.\d+\.\d+)", pkg)
+        expected = match.group(1) if match else None
         octoagent = self._resolve_octoagent()
+        installed = await asyncio.to_thread(self._installed_version, octoagent) if octoagent else None
+        env = {**os.environ, "npm_config_cache": os.path.join(os.path.expanduser("~"), ".npm-ale")}
+        if not octoagent or expected is None or installed != expected:
+            prefix = os.path.join(os.path.expanduser("~"), ".local")
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [npm, "install", "-g", "--force", "--prefix", prefix, pkg],
+                capture_output=True, text=True, timeout=600, env=env,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"octavus_cli: npm install -g {pkg} failed "
+                    f"(rc={proc.returncode}): {(proc.stderr or '')[-500:]}"
+                )
+            os.environ["PATH"] = os.path.join(prefix, "bin") + os.pathsep + os.environ.get("PATH", "")
+            octoagent = self._resolve_octoagent()
         if not octoagent:
             raise RuntimeError(
                 f"octavus_cli: 'octoagent' not found after npm install -g {pkg}"
             )
+        installed = await asyncio.to_thread(self._installed_version, octoagent)
+        if not installed or (expected is not None and installed != expected):
+            raise RuntimeError(f"octavus_cli: installed version {installed!r} != {expected!r}")
         self._octoagent_path = octoagent
+        self.actual_cli_version = installed
+        self.cli_source = "official"
         logger.info("octavus_cli: octoagent CLI ready at %s", octoagent)
 
         self._chrome_path = cfg.chrome_path or await self._ensure_chrome()
@@ -317,8 +337,8 @@ class OctavusCliDeployer(BaseAgentDeployer):
     def _resolve_octoagent() -> str | None:
         home = os.path.expanduser("~")
         for candidate in (
-            os.path.join(home, ".npm-global", "bin", "octoagent"),
             os.path.join(home, ".local", "bin", "octoagent"),
+            os.path.join(home, ".npm-global", "bin", "octoagent"),
         ):
             if os.path.exists(candidate):
                 return candidate

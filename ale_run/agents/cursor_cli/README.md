@@ -149,27 +149,26 @@ harness: cursor_cli
 model: composer-2.5          # default "" = auto (deployer omits --model)
 # provider: cursor           # fixed; cursor-agent has no OpenRouter/BYOK path
 # disabled_tools: []         # permission deny patterns for cli-config.json
-# cursor_version: "..."      # pinned cursor-agent version (install target)
+# cli_version: "..."         # pinned cursor-agent version (install target)
 ```
 
 | Field | Meaning |
 |---|---|
 | `model` | Cursor catalog id passed via `--model`. `""` ⇒ auto. Enumerate with `cursor-agent --list-models`. **Tier is part of the id** (e.g. `composer-2.5` = Standard, `composer-2.5-fast` = Fast: same model, ~6× price, lower latency only). |
 | `provider` | Fixed `"cursor"` — documents that BYOK/OpenRouter is unsupported. The deployer does not branch on it. |
-| `cursor_version` | Pinned version installed when `cursor-agent` is absent or mismatched. |
+| `cli_version` | Pinned version installed when `cursor-agent` is absent or mismatched. |
 | `disabled_tools` | Patterns (`Shell(...)`, `Read(...)`, `Mcp(server,tool)`, …) injected into `cli-config.json` `permissions.deny`. |
 ---
 
 ## Install
 
 The deployer handles install automatically:
-- Pins `cursor_version` and downloads that exact build from
+- Pins `cli_version` and downloads that exact build from
   `downloads.cursor.com/.../agent-cli-package.tar.gz`, extracting to
   `~/.local/share/cursor-agent/versions/<version>/`.
 - **Skips** the download when the pinned version is already baked there
   (Linux: detected on PATH; Windows: detected by version dir).
-- Falls back to `curl -fsSL https://cursor.com/install | bash` (latest-only) if
-  the pinned download fails.
+- Fails if the pinned download or post-install version check fails.
 
 Manual install (for local testing) is the same `cursor.com/install` one-liner.
 

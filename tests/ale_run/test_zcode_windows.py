@@ -75,7 +75,7 @@ async def test_windows_install_builds_pinned_source_and_isolates_provider_files(
 
     await deployer.install()
     repo = Path.home() / ".zcode_build/ZCode"
-    clone.assert_awaited_once_with(repo, deployer.config.cli_ref)
+    clone.assert_awaited_once_with(repo, deployer.config.cli_version)
     install.assert_awaited_once_with("pnpm.cjs", repo)
     pnpm.assert_awaited_once_with(str(npm))
     assert deployer._cli_path.is_file()
@@ -98,6 +98,125 @@ async def test_windows_missing_api_key_fails_before_bootstrap(deployer, monkeypa
     with pytest.raises(RuntimeError, match="config.api_key is required"):
         await deployer.install()
     bootstrap.assert_not_awaited()
+
+
+async def test_windows_reuses_verified_pinned_build(deployer, tmp_path, monkeypatch):
+    node = tmp_path / "runtime/node.exe"
+    npm = node.parent / "node_modules/npm/bin/npm-cli.js"
+    npm.parent.mkdir(parents=True)
+    npm.touch()
+    monkeypatch.setattr(_bootstrap, "ensure_node_npm", AsyncMock(return_value=(str(node), "npm.cmd")))
+    monkeypatch.setattr(module.shutil, "which", lambda name: "git.exe" if name == "git" else None)
+    monkeypatch.setattr(deployer, "_ensure_windows_node", AsyncMock(return_value=str(node)))
+    monkeypatch.setattr(deployer, "_ensure_pnpm", AsyncMock(return_value="pnpm.cjs"))
+    monkeypatch.setattr(deployer, "_cached_build_matches", AsyncMock(return_value=True))
+    clone, install, build = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(deployer, "_clone_or_update", clone)
+    monkeypatch.setattr(deployer, "_pnpm_install", install)
+    monkeypatch.setattr(deployer, "_pnpm_build", build)
+    cli = Path.home() / ".zcode_build/ZCode" / module._CLI_DIST_RELPATH
+    cli.parent.mkdir(parents=True)
+    cli.touch()
+    builtin = cli.parent / "provider/zcode-builtin.json"
+    builtin.parent.mkdir()
+    builtin.write_text(json.dumps({"config": {"modelConfigRules": {"builtinProviderModelRules": []}}}))
+
+    await deployer.install()
+
+    clone.assert_not_awaited()
+    install.assert_not_awaited()
+    build.assert_not_awaited()
+    assert deployer.actual_cli_version == deployer.config.cli_version
+
+
+async def test_cached_build_rejects_changes_and_unpinned_refs(deployer, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "tracked.txt").write_text("original")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com",
+         "commit", "-qm", "test"], check=True,
+    )
+    ref = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    cli = repo / module._CLI_DIST_RELPATH
+    cli.parent.mkdir(parents=True)
+    cli.write_text("process.stdout.write('1.2.3')")
+    builtin = cli.parent / "provider/zcode-builtin.json"
+    builtin.parent.mkdir()
+    builtin.write_text("{}")
+    modules = repo / "node_modules/.modules.yaml"
+    modules.parent.mkdir()
+    modules.touch()
+    deployer._node_path = shutil.which("node")
+    assert deployer._node_path
+    identity = await deployer._build_identity(repo, ref)
+    assert identity is not None and identity["revision"] == ref
+    deployer._build_identity_path(repo).write_text(json.dumps(identity))
+    assert await deployer._cached_build_matches(repo, ref)
+    assert not await deployer._cached_build_matches(repo, "main")
+    cli.write_text("process.stdout.write('1.2.4')")
+    assert not await deployer._cached_build_matches(repo, ref)
+    cli.write_text("process.stdout.write('1.2.3')")
+    (repo / "tracked.txt").write_text("modified")
+    assert not await deployer._cached_build_matches(repo, ref)
+    (repo / "tracked.txt").write_text("original")
+    modules.unlink()
+    assert not await deployer._cached_build_matches(repo, ref)
+
+
+@pytest.mark.parametrize("returncode,actual", [(0, "other"), (1, "expected")])
+async def test_post_build_source_check_rejects_mismatch(deployer, tmp_path, monkeypatch, returncode, actual):
+    monkeypatch.setattr(
+        deployer, "_run_command",
+        AsyncMock(return_value=subprocess.CompletedProcess([], returncode, actual, "")),
+    )
+    with pytest.raises(RuntimeError, match="source revision changed"):
+        await deployer._verify_source(tmp_path, "expected")
+
+
+async def test_source_check_rejects_modified_tracked_files(deployer, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    tracked = repo / "source.txt"
+    tracked.write_text("original", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", tracked.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com",
+         "commit", "-qm", "test"], check=True,
+    )
+    ref = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    tracked.write_text("modified", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "checkout", "--detach", ref], check=True, capture_output=True)
+    with pytest.raises(RuntimeError, match="source.*modified"):
+        await deployer._verify_source(repo, ref)
+
+
+async def test_install_checks_source_before_installing_or_building(deployer, tmp_path, monkeypatch):
+    node = tmp_path / "runtime/node.exe"
+    npm = node.parent / "node_modules/npm/bin/npm-cli.js"
+    npm.parent.mkdir(parents=True)
+    npm.touch()
+    monkeypatch.setattr(_bootstrap, "ensure_node_npm", AsyncMock(return_value=(str(node), "npm.cmd")))
+    monkeypatch.setattr(module.shutil, "which", lambda name: "git.exe" if name == "git" else None)
+    monkeypatch.setattr(deployer, "_ensure_windows_node", AsyncMock(return_value=str(node)))
+    monkeypatch.setattr(deployer, "_ensure_pnpm", AsyncMock(return_value="pnpm.cjs"))
+    monkeypatch.setattr(deployer, "_cached_build_matches", AsyncMock(return_value=False))
+
+    async def clone(repo, ref):
+        deployer._resolved_ref = ref
+
+    monkeypatch.setattr(deployer, "_clone_or_update", clone)
+    monkeypatch.setattr(deployer, "_verify_source", AsyncMock(side_effect=RuntimeError("modified source")))
+    install, build = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(deployer, "_pnpm_install", install)
+    monkeypatch.setattr(deployer, "_pnpm_build", build)
+    with pytest.raises(RuntimeError, match="modified source"):
+        await deployer.install()
+    install.assert_not_awaited()
+    build.assert_not_awaited()
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -202,7 +321,7 @@ async def test_windows_pnpm_is_private_pinned_and_not_a_cmd_shim(
 async def test_windows_clone_enables_longpaths_before_checkout(deployer, tmp_path, monkeypatch):
     command = AsyncMock(return_value=subprocess.CompletedProcess([], 0, "test-sha\n", ""))
     monkeypatch.setattr(deployer, "_run_command", command)
-    await deployer._clone_or_update(tmp_path / "repo", deployer.config.cli_ref)
+    await deployer._clone_or_update(tmp_path / "repo", deployer.config.cli_version)
     commands = [call.args[0] for call in command.await_args_list]
     config_index = next(index for index, argv in enumerate(commands) if "core.longpaths" in argv)
     checkout_index = next(index for index, argv in enumerate(commands) if "checkout" in argv)

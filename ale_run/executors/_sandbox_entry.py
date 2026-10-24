@@ -437,6 +437,15 @@ def run(spec: dict, env: dict | None = None) -> dict:
                 dep_cls.__name__, executor.work_dir,
             )
             loop.run_until_complete(deployer.install())
+            version = getattr(deployer, "actual_cli_version", None)
+            source = getattr(deployer, "cli_source", None)
+            identity = {
+                "cli_version": version if isinstance(version, str) else None,
+                "source": source if isinstance(source, str) and source in {"official", "fork", "custom"} else None,
+            }
+            (Path(executor.work_dir) / "_cli_identity.json").write_text(
+                json.dumps(identity), encoding="utf-8",
+            )
             timeout_s = float(spec.get("timeout_s") or 1800.0)
             logger.info(
                 "sandbox_entry: %s.launch (timeout_s=%.0f)",

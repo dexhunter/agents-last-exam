@@ -81,6 +81,15 @@ def test_launch_preserves_complete_multiline_prompt(tmp_path: Path, monkeypatch)
     assert (Path(executor.work_dir) / "prompt.txt").read_bytes().decode() == prompt
 
 
+def test_legacy_cli_keeps_its_original_argv(tmp_path: Path) -> None:
+    config = KimiCodeConfig(cli_version="@moonshot-ai/kimi-code@0.27.0")
+    deployer = KimiCodeDeployer(SimpleNamespace(config=config, work_dir=str(tmp_path)))
+    deployer._kimi_command = ["kimi"]
+    assert deployer._build_argv("prompt") == [
+        "kimi", "--prompt", "prompt", "--output-format", "stream-json",
+    ]
+
+
 @pytest.mark.parametrize("platform,expected_flags", [("nt", 0x08000000), ("posix", 0)])
 def test_headless_launch_does_not_open_windows_console(
     tmp_path, monkeypatch, platform, expected_flags

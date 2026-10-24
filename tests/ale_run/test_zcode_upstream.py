@@ -16,7 +16,7 @@ def test_pinned_registry_defaults_reach_real_sdk_transport():
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=upstream, text=True
     ).strip()
-    assert revision == ZCodeConfig().cli_ref
+    assert revision == ZCodeConfig().cli_version
     builtin_path = upstream / "apps/zcode-cli/packages/cli/dist/provider/zcode-builtin.json"
     upstream_builtin = json.loads(builtin_path.read_text(encoding="utf-8"))
     cases = []

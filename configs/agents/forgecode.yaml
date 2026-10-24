@@ -19,7 +19,7 @@ config:
 
   # Pinned forge release tag (no "v" prefix). Pinned so forge's agent mode doesn't
   # self-update to latest on startup (also disabled at runtime via [updates]).
-  forge_version: "2.13.0"
+  cli_version: "2.14.0"
 
   # Sampling temperature written into forge.toml. null = omit (forge default).
   temperature: 0.7

@@ -6,9 +6,9 @@ file explains *how* it is built, installed, and tested.
 ## 1. Source / install strategy
 
 - Upstream: `All-Hands-AI/OpenHands-CLI` (V1 CLI).
-- Package: `openhands-cli` on PyPI (official pip package, no fork needed).
-- Pinned version: `1.15.1` (configurable via `cli_version` in config).
-- Install: `uv pip install openhands-cli==<version>` with pip fallback.
+- Package: `openhands` on PyPI (official pip package, no fork needed).
+- Pinned version: `1.16.0` (configurable via `cli_version` in config).
+- Install: `uv pip install openhands==<version>` with pip fallback.
 
 ## 2. CLI invocation
 
@@ -111,9 +111,9 @@ LLM_MODEL=anthropic/<model>
 The deployer's `install()` method handles installation automatically:
 
 ```bash
-uv pip install openhands-cli==1.15.1
+uv pip install openhands==1.16.0
 # or fallback:
-pip install openhands-cli==1.15.1
+pip install openhands==1.16.0
 ```
 
 The CUA MCP Server is expected to be baked into the sandbox image.

@@ -120,6 +120,7 @@ class DockerExecutor(BaseExecutor):
 
         host_work = Path(self.work_dir)
         host_work.mkdir(parents=True, exist_ok=True)
+        (host_work / "_cli_identity.json").unlink(missing_ok=True)
         (host_work / "_agent_started").unlink(missing_ok=True)
 
         if not _docker_available():

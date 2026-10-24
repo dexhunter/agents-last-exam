@@ -150,6 +150,6 @@ def test_real_probe_is_detached_and_reaped(tmp_path):
 def test_preset_and_config_pin_the_same_cli_version(tmp_path):
     preset = Path(__file__).resolve().parents[2] / "configs/agents/octavus_cli.yaml"
     config = OctavusCliConfig(**yaml.safe_load(preset.read_text())["config"])
-    assert config.cli_version == OctavusCliConfig().cli_version == "@octavus/agent@1.0.10"
+    assert config.cli_version == OctavusCliConfig().cli_version == "@octavus/agent@1.0.32"
     assert _deployer(tmp_path).version == config.cli_version
     assert "octoagent.oom_probe.log" in OctavusCliDeployer.hot_artifacts
