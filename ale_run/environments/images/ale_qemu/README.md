@@ -83,7 +83,7 @@ snapshots:
 Retain the immutable `image_revision` from `configs/environments/qemu.yaml` in
 both snapshot blocks. Use `selected_tasks/cpu.txt` for the 119 CPU tasks. See
 [the release guide](../../../../docs/releases/v1.1.md) for checksums, image pins,
-and the log upgrade command. `run.json` records provider image provenance in
+and guidance on reusing v1 results. `run.json` records provider image provenance in
 `environment.image_revision`.
 
 The profile defaults to `output_path: null`. Use `cleanup_mode: keep` to

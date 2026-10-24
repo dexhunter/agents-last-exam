@@ -52,9 +52,7 @@ of the environment configuration.
 
 Use `configs/environments/qemu.yaml` as the starting configuration, preserving
 each snapshot's `image_revision` pin from the [release manifest](../releases/v1.1/assets.json).
-Published payloads are unchanged: standalone data packages 150 tasks (28
-inactive), and VM disks package 151 (29 inactive, including PDE). Inactive
-payloads are not selected; v1.1 has 122 active tasks. See the
+Hugging Face data packages cover the 122 selected tasks. See the
 [release guide](releases/v1.1.md) or [original v1 setup](releases/v1.md).
 
 ## Check capacity and run

@@ -190,9 +190,8 @@ Set `tasks:` in your experiment to a compatible list:
 | `selected_tasks/docker_support.txt` | 78 | Supported local-container subset |
 
 Difficulty tracks contain 45 near-term, 46 full-spectrum, and 36 last-exam
-tasks. These lists overlap. Published data and images are unchanged: standalone
-data packages 150 tasks (28 inactive), and VM images package 151 (29 inactive,
-including PDE). Inactive payloads are not selected or counted as benchmark tasks.
+tasks. These lists overlap. The Hugging Face data packages cover the 122 selected
+tasks.
 
 Environment profiles default to `output_path: null`, keeping bulk task output
 in the sandbox while collecting metadata, trajectories, evaluations, and

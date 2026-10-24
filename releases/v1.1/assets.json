@@ -54,31 +54,31 @@
   "huggingface": {
     "public": {
       "repo": "agents-last-exam/agents-last-exam-data",
-      "revision": "bae6244b87da74b212748993863b3ca4f5ba84ad",
+      "revision": "e9a2674a62f7d8069f136e642c10e8d8e9979dbf",
       "gated": false,
       "tag": "v1.1"
     },
     "reference": {
       "repo": "agents-last-exam/agents-last-exam-reference",
-      "revision": "628e7f22ba6d9e399f8ab097587f93627a82848b",
+      "revision": "e6a990308d79da249d596871c2cc9a40396e4e22",
       "gated": "manual",
       "tag": "v1.1"
     },
     "metadata": {
       "repo": "agents-last-exam/agents-last-exam",
-      "revision": "d35928193ff62fee808d0af5fc45af03e43b9216",
+      "revision": "70895aea227ef2e275b990ca3f1295598f03c9f4",
       "gated": false,
       "tag": "v1.1"
     },
     "archive": {
       "repo": "agents-last-exam/agents-last-exam-data-archive",
-      "revision": "08a30d40604e809c4eef2ede783ebf219c15987b",
+      "revision": "46225f1caa4f43c275cc06a5da47d886f64feb6c",
       "gated": "manual",
       "tag": "v1.1"
     },
     "images": {
       "repo": "agents-last-exam/ale-images-qcow2",
-      "revision": "40ba46b348a684b7d1b34d18e308aed54737f41a",
+      "revision": "21290f6d47ae765def3c799281e8cf6e4bc22a22",
       "gated": false,
       "tag": "v1.1"
     }
@@ -121,85 +121,25 @@
   },
   "task_data": {
     "selected_tasks": 122,
-    "logical_members": 85280,
-    "manifest_sha256": "05c8975a5c68309d724a3bdbefa7ef1675bada4f4bde809fbacf113d25bb24bf",
-    "image_task_coverage": 151,
-    "image_inactive_tasks": [
-      "agriculture_env/crop_rotation_d02",
-      "agriculture_env/ndvi_zonal_statistics_d02",
-      "business_finance/financial_stmt_reconstruction_aapl_fy2024",
-      "business_finance/pe_screening_memo_1",
-      "computing_math/branch_bound_atsp",
-      "computing_math/ising_post_measurement_1",
-      "computing_math/k3_abelian_extensions",
-      "computing_math/os_log_permission_guard_v1",
-      "education_info/homework_grading_numerical_pdes_instance_02",
-      "education_info/moodle_gradebook_closeout_reconciliation",
-      "engineering/abb_irb6700_asset_to_urdf_instance_1",
-      "engineering/sanding_performance_scoring_instance_1",
-      "health_medicine/Clinical_Variant_Annotation",
-      "health_medicine/crf_sdtm_mapping_4",
-      "health_medicine/epidemiology_forecast",
-      "health_medicine/healthcare_bias_audit_27a_public_replication_v1",
-      "health_medicine/healthcare_variant_annotation_pipeline",
-      "health_medicine/replicate_paper_1",
-      "health_medicine/scene3_skullstrip_qc",
-      "life_sciences/amber_minimization_script_prep_instance_1",
-      "life_sciences/gene_expression_differential_analysis_functional_enrichment_analysis_1",
-      "life_sciences/genomic_interval_processing_1",
-      "life_sciences/hg002_chr22_germline_variant_pipeline",
-      "life_sciences/protein_function_annotation_instance_1",
-      "life_sciences/pseudotime_de",
-      "life_sciences/rgi_mcr1_colistin_v2",
-      "physical_sciences/adapt_vqe_molecular_energy",
-      "transport_safety/capacitated_vehicle_routing_problems",
-      "visual_media/inkscape_cultural_poster_design"
-    ],
+    "logical_members": 79494,
+    "manifest_sha256": "def33fda086c5f1ce0064c54294af4aac92a619aeefdbed863bf230b01aa0c63",
+    "image_data_manifest_sha256": "05c8975a5c68309d724a3bdbefa7ef1675bada4f4bde809fbacf113d25bb24bf",
     "hf_image_projection": "v1.1-platform-projections.json",
     "archive_filename": "ale-tasks-data.tar.gz",
-    "archive_sha256": "6977425145fdf25f6065e3573c956aca8bb775ede5c6828f299b3dc7e84b1a2e",
-    "archive_bytes": 47649358131,
+    "archive_sha256": "a7fd6eafbffcebf393580c45ce7afa4908dcd1e2ceaabcebbc867e28c7cea0a2",
+    "archive_bytes": 39155440558,
     "public_reference_format": "header-encrypted reference.7z",
     "gcs_public": {
       "generation_size_crc32c_match": true,
       "objects": 68609,
-      "prefix": "gs://ale-data-public/v1.1/"
+      "prefix": "gs://ale-data-public/v1.1/",
+      "source_logical_manifest_sha256": "05c8975a5c68309d724a3bdbefa7ef1675bada4f4bde809fbacf113d25bb24bf",
+      "public_input_software_objects": 68461,
+      "public_reference_archives": 148
     },
-    "public_input_software_objects": 68461,
-    "public_reference_archives": 148,
     "hf_native_path_transport": "_transport/v1.1/path-compatibility.tar",
     "hf_public_symlink_transport": "_transport/v1.1/tcga-public-symlinks.tar",
-    "archive_task_coverage": 150,
-    "archive_inactive_tasks": [
-      "agriculture_env/crop_rotation_d02",
-      "agriculture_env/ndvi_zonal_statistics_d02",
-      "business_finance/financial_stmt_reconstruction_aapl_fy2024",
-      "business_finance/pe_screening_memo_1",
-      "computing_math/branch_bound_atsp",
-      "computing_math/ising_post_measurement_1",
-      "computing_math/k3_abelian_extensions",
-      "computing_math/os_log_permission_guard_v1",
-      "education_info/moodle_gradebook_closeout_reconciliation",
-      "engineering/abb_irb6700_asset_to_urdf_instance_1",
-      "engineering/sanding_performance_scoring_instance_1",
-      "health_medicine/Clinical_Variant_Annotation",
-      "health_medicine/crf_sdtm_mapping_4",
-      "health_medicine/epidemiology_forecast",
-      "health_medicine/healthcare_bias_audit_27a_public_replication_v1",
-      "health_medicine/healthcare_variant_annotation_pipeline",
-      "health_medicine/replicate_paper_1",
-      "health_medicine/scene3_skullstrip_qc",
-      "life_sciences/amber_minimization_script_prep_instance_1",
-      "life_sciences/gene_expression_differential_analysis_functional_enrichment_analysis_1",
-      "life_sciences/genomic_interval_processing_1",
-      "life_sciences/hg002_chr22_germline_variant_pipeline",
-      "life_sciences/protein_function_annotation_instance_1",
-      "life_sciences/pseudotime_de",
-      "life_sciences/rgi_mcr1_colistin_v2",
-      "physical_sciences/adapt_vqe_molecular_energy",
-      "transport_safety/capacitated_vehicle_routing_problems",
-      "visual_media/inkscape_cultural_poster_design"
-    ]
+    "archive_task_coverage": 122
   },
   "qemu_runner": {
     "image": "agentslastexam/ale-qemu:0.2.0",
@@ -267,7 +207,6 @@
       "verification": 43,
       "environment": 32,
       "data": 23
-    },
-    "task_change_manifest": "releases/v1.1/upgrade.json"
+    }
   }
 }
