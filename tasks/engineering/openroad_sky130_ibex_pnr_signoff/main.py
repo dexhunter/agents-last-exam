@@ -9,6 +9,7 @@ import math
 import os
 import posixpath
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,7 +57,8 @@ EVAL_TMP_DIR = f"/dev/shm/agenthle_eval/{TASK_NAME}"
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 ALLOWED_OUTPUT_DIRS = {"output", "output_test_pos", "output_test_neg"}
 VERIFIER_POLL_INTERVAL_S = 20
-VERIFIER_TIMEOUT_S = 7200
+VERIFIER_TIMEOUT_S = 7800
+EVALUATION_TIMEOUT_S = 8100
 
 
 def _read_script(name: str) -> str:
@@ -150,10 +152,9 @@ async def _run_verifier_background(
     pid = pid_lines[-1]
     logger.info("[%s] verifier started in background pid=%s run_dir=%s", tag, pid or "unknown", run_dir)
 
-    waited = 0
-    while waited < VERIFIER_TIMEOUT_S:
+    started = time.monotonic()
+    while time.monotonic() - started < VERIFIER_TIMEOUT_S:
         await asyncio.sleep(VERIFIER_POLL_INTERVAL_S)
-        waited += VERIFIER_POLL_INTERVAL_S
         done = await _run_command(
             session,
             "bash -lc " + shlex.quote(f"test -f {shlex.quote(rc_file)} && echo DONE || echo RUNNING"),
@@ -174,7 +175,7 @@ async def _run_verifier_background(
                 "[%s] verifier completed rc=%s after %ss; logs under %s",
                 tag,
                 (rc_text or "").strip() or "unknown",
-                waited,
+                round(time.monotonic() - started),
                 run_dir,
             )
             if (rc_text or "").strip() not in {"0", "1"}:
@@ -262,6 +263,9 @@ You are working on Linux on an RTL-to-GDSII signoff-closure task for lowRISC ibe
 - `{self.output_audit_dir}/config.mk.pass*` if any completed pass exists
 - `{self.output_audit_dir}/pass*.stamp` if any completed pass exists
 
+The final configuration must complete two full runs from clean working directories on the provided
+machine, using the original random seed and a different random seed, within two hours combined.
+
 Do not modify files under `{self.input_dir}`.
 """
 
@@ -270,6 +274,7 @@ Do not modify files under `{self.input_dir}`.
         metadata.update(
             {
                 "task_id": TASK_ID,
+                "evaluation_timeout_s": EVALUATION_TIMEOUT_S,
                 "task_dir": self.task_dir,
                 "input_dir": self.input_dir,
                 "input_task_instructions": self.input_task_instructions,

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from ale_run.orchestration.experiment_spec import (
     RunUnit,
 )
 from ale_run.orchestration.runner import Runner
+from ale_run.tasks.driver import TaskDriver
 from tasks.utils.evaluation import JudgeInfrastructureError
 
 
@@ -37,13 +39,19 @@ def episode(tmp_path, monkeypatch):
         reset_session=Mock(),
     )
     environment.set_phase = lambda phase: setattr(environment, "current_phase", phase)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "_spec.json").write_text(json.dumps({"run_token": "judge-test"}))
+    (work_dir / "_agent_started").write_text("judge-test")
     executor = SimpleNamespace(
-        work_dir=str(tmp_path / "work"),
+        work_dir=str(work_dir),
         run_deployer=AsyncMock(),
         stop_deployer=AsyncMock(),
         gather_dir=AsyncMock(return_value=GatherReport(transport="local")),
     )
-    driver = SimpleNamespace(setup=AsyncMock(), close=AsyncMock(), evaluate=AsyncMock())
+    driver = SimpleNamespace(
+        setup=AsyncMock(), close=AsyncMock(), evaluate=AsyncMock(), evaluation_timeout_s=None,
+    )
     deployer = SimpleNamespace(parse_artifacts=Mock())
     unit = RunUnit(
         "judge-test",
@@ -171,6 +179,68 @@ async def test_evaluator_timeout_semantics_are_unchanged(episode, agent_status):
     assert episode.executor.run_deployer.await_count == 1
     assert result.score is None
     assert not cli._unit_already_done(episode.unit, episode.runner.output_root)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "8100", float("inf"), float("nan"), 10**1000])
+def test_task_evaluation_budget_rejects_invalid_metadata(value):
+    driver = object.__new__(TaskDriver)
+    driver._task_info = {"metadata": {"evaluation_timeout_s": value}}
+    with pytest.raises(ValueError, match="finite positive number"):
+        _ = driver.evaluation_timeout_s
+
+
+@pytest.mark.parametrize("metadata,expected", [({}, None), ({"evaluation_timeout_s": 8100}, 8100.0),
+                                             ({"evaluation_timeout_s": 0.01}, 0.01)])
+def test_task_driver_exposes_evaluation_budget(metadata, expected):
+    driver = object.__new__(TaskDriver)
+    driver._task_info = {"metadata": metadata}
+    assert driver.evaluation_timeout_s == expected
+
+
+def test_real_openroad_task_declares_outer_evaluation_grace():
+    driver = TaskDriver("tasks/engineering/openroad_sky130_ibex_pnr_signoff", session=None)
+    assert driver.evaluation_timeout_s == 8100
+
+
+@pytest.mark.parametrize("declared,expected", [(None, 7200), (8100.0, 8100.0)])
+async def test_lifecycle_wait_for_uses_task_evaluation_budget(episode, monkeypatch, declared, expected):
+    episode.driver.evaluation_timeout_s = declared
+    episode.executor.run_deployer.return_value = AgentRunResult(status="completed")
+    episode.driver.evaluate.return_value = {"score": 0.0}
+    original_wait_for = lifecycle.asyncio.wait_for
+    timeouts = []
+
+    async def observe(awaitable, *, timeout):
+        timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(lifecycle.asyncio, "wait_for", observe)
+    result = (await episode.runner.run([episode.unit]))[0]
+    assert result.eval_status == "success"
+    assert result.score == 0.0
+    assert timeouts[-1] == expected
+    episode.environment.close_async.assert_awaited_once_with(mode="delete")
+
+
+async def test_declared_evaluation_budget_actually_cancels_and_reports_it(episode):
+    episode.driver.evaluation_timeout_s = 0.01
+    episode.executor.run_deployer.return_value = AgentRunResult(status="completed")
+    cancelled = False
+
+    async def pending():
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    episode.driver.evaluate.side_effect = pending
+    result = (await episode.runner.run([episode.unit]))[0]
+    assert result.eval_status == "timeout"
+    assert result.score is None
+    assert result.error == "evaluate() exceeded 0.01s wall-clock"
+    assert cancelled
+    episode.environment.close_async.assert_awaited_once_with(mode="delete")
 
 
 @pytest.mark.parametrize(

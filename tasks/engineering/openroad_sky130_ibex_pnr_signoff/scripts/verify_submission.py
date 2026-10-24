@@ -8,9 +8,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -47,6 +50,9 @@ SYNTH_STAT_REL = "flow/reports/sky130hd/ibex/base/synth_stat.txt"
 PASS_LOG_DIR_REL = "flow/logs/sky130hd/ibex/base"
 CTS_LOG_REL = "flow/logs/sky130hd/ibex/base/4_1_cts.log"
 CTS_ILLEGAL_INSTRUCTION_MARKER = "child killed: illegal instruction"
+FLOW_WALL_BUDGET_S = 7200
+DOCKER_CONTROL_TIMEOUT_S = 30
+
 
 BANNED_SDC_PATTERNS = [
     re.compile(r"\bset_false_path\b.*\bclk_i\b"),
@@ -100,6 +106,10 @@ _UNSET_ANNOTATION_RE = re.compile(
     r"\(\s*default(?:\s+value)?\s+[-+]?\d+(?:\.\d+)?\s*\))?\s*\)?\s*$",
     re.IGNORECASE,
 )
+
+
+class FlowBudgetExceeded(Exception):
+    """The two-run computation budget expired while a flow was running."""
 
 
 @dataclass
@@ -723,27 +733,30 @@ def gate_g12_anti_gaming(submission_dir: Path, starter_dir: Path, frozen_hashes:
 
 
 def _run_docker_flow_once(
-    work_dir: Path, env: dict[str, str] | None = None, *, routing_seed: int | None = None
+    work_dir: Path,
+    env: dict[str, str] | None = None,
+    *,
+    routing_seed: int | None = None,
+    deadline: float | None = None,
 ) -> int:
     dockerfile = work_dir / "Dockerfile"
     match = re.search(r"FROM\s+openroad/orfs@(sha256:[0-9a-f]+)", dockerfile.read_text())
     if not match:
-        print("[docker] no pinned digest in Dockerfile; aborting", file=sys.stderr)
-        return 2
+        raise RuntimeError("no pinned digest in evaluator Dockerfile")
 
     image = f"openroad/orfs@{match.group(1)}"
     uid = os.getuid()
     gid = os.getgid()
     tmp_dir = work_dir / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    command: list[str] = []
+    docker: list[str] = []
     if os.geteuid() != 0:
-        command.extend(["sudo", "-n"])
+        docker.extend(["sudo", "-n"])
+    docker.append("docker")
+    container = f"ale-openroad-{uuid.uuid4().hex}"
+    command = docker + ["run", "--name", container, "--pull=never"]
     command.extend(
         [
-            "docker",
-            "run",
-            "--rm",
             "--platform",
             "linux/amd64",
             "--user",
@@ -770,8 +783,107 @@ def _run_docker_flow_once(
             raise ValueError("routing_seed must be a nonnegative 32-bit integer")
         make_command += f" OR_SEED={routing_seed}"
     command.extend([image, "bash", "-lc", make_command])
+    probe = subprocess.run(
+        docker + ["image", "inspect", image],
+        capture_output=True, text=True, timeout=DOCKER_CONTROL_TIMEOUT_S, check=False,
+    )
+    if probe.returncode != 0:
+        recovery = subprocess.run(
+            docker[:-1] + ["systemctl", "start", "docker.service"],
+            capture_output=True, text=True, timeout=DOCKER_CONTROL_TIMEOUT_S, check=False,
+        )
+        if recovery.returncode != 0:
+            raise RuntimeError(f"Docker service recovery failed: {recovery.stderr[-2000:]}")
+        probe = subprocess.run(
+            docker + ["image", "inspect", image],
+            capture_output=True, text=True, timeout=DOCKER_CONTROL_TIMEOUT_S, check=False,
+        )
+    if probe.returncode != 0:
+        raise RuntimeError(f"Docker or pinned image unavailable: {probe.stderr[-2000:]}")
+    if deadline is None:
+        deadline = time.monotonic() + FLOW_WALL_BUDGET_S
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise FlowBudgetExceeded("combined flow budget exhausted before the next run")
     print(f"[docker] {' '.join(command)}", file=sys.stderr)
-    return subprocess.run(command, check=False).returncode
+    process = None
+    with (work_dir / f"{container}.stdout").open("w") as stdout, (
+        work_dir / f"{container}.stderr"
+    ).open("w") as stderr:
+        try:
+            process = subprocess.Popen(
+                command, stdout=stdout, stderr=stderr, start_new_session=True,
+            )
+            expired = False
+            try:
+                rc = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                expired = True
+                rc = None
+            finished = time.monotonic()
+            log_tails = []
+            for stream in (stdout, stderr):
+                with Path(stream.name).open("rb") as log:
+                    log.seek(max(0, os.fstat(log.fileno()).st_size - 8192))
+                    tail = log.read().decode("utf-8", errors="replace")
+                log_tails.append(tail)
+                print(f"[docker] {stream.name} tail:\n{tail}", file=sys.stderr)
+            state_result = subprocess.run(
+                docker + ["inspect", "--format", "{{json .State}}", container],
+                capture_output=True,
+                text=True,
+                timeout=DOCKER_CONTROL_TIMEOUT_S,
+                check=False,
+            )
+            if state_result.returncode != 0:
+                raise RuntimeError(f"cannot inspect flow container: {state_result.stderr[-2000:]}")
+            state = json.loads(state_result.stdout)
+            if not isinstance(state, dict) or not isinstance(state.get("Running"), bool):
+                raise RuntimeError(f"invalid flow container state: {state}")
+            if state.get("OOMKilled") or state.get("Error"):
+                raise RuntimeError(f"flow container infrastructure failure: {state}")
+            resource_errors = (
+                "no space left on device", "read-only file system",
+                "cannot allocate memory", "disk quota exceeded",
+            )
+            if rc != 0 and any(
+                marker in tail.lower() for tail in log_tails for marker in resource_errors
+            ):
+                raise RuntimeError("flow infrastructure resource failure; see Docker log tails")
+            if expired:
+                if not state.get("Running"):
+                    raise RuntimeError("Docker client timed out without a running computation")
+                raise FlowBudgetExceeded("combined flow budget exhausted during computation")
+            if rc in {125, 126, 127, 137, 143} or rc < 0 or state.get("Running"):
+                raise RuntimeError(f"Docker execution failed: rc={rc}, state={state}")
+            if finished > deadline:
+                raise FlowBudgetExceeded("combined flow budget exhausted during computation")
+            return rc
+        finally:
+            try:
+                cleanup = subprocess.run(
+                    docker + ["rm", "--force", container],
+                    capture_output=True,
+                    text=True,
+                    timeout=DOCKER_CONTROL_TIMEOUT_S,
+                    check=False,
+                )
+                if cleanup.returncode != 0:
+                    raise RuntimeError(f"flow container cleanup failed: {cleanup.stderr[-2000:]}")
+            finally:
+                if process is not None and process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
 
 
 def _cts_illegal_instruction_detected(work_dir: Path) -> bool:
@@ -782,9 +894,15 @@ def _cts_illegal_instruction_detected(work_dir: Path) -> bool:
 
 
 def run_docker_flow(
-    work_dir: Path, env: dict[str, str] | None = None, *, routing_seed: int | None = None
+    work_dir: Path,
+    env: dict[str, str] | None = None,
+    *,
+    routing_seed: int | None = None,
+    deadline: float | None = None,
 ) -> int:
-    rc = _run_docker_flow_once(work_dir, env=env, routing_seed=routing_seed)
+    if deadline is None:
+        deadline = time.monotonic() + FLOW_WALL_BUDGET_S
+    rc = _run_docker_flow_once(work_dir, env=env, routing_seed=routing_seed, deadline=deadline)
     if rc == 0:
         return 0
 
@@ -800,7 +918,7 @@ def run_docker_flow(
         "[docker] detected CTS illegal-instruction failure; retrying with SKIP_CTS_REPAIR_TIMING=1",
         file=sys.stderr,
     )
-    return _run_docker_flow_once(work_dir, env=retry_env, routing_seed=routing_seed)
+    return _run_docker_flow_once(work_dir, env=retry_env, routing_seed=routing_seed, deadline=deadline)
 
 
 def score_submission(submission_dir: Path, starter_dir: Path, frozen_hashes: dict[str, str]) -> Report:
@@ -828,6 +946,8 @@ def gate_g9_reseed(
     submission_journal: Path,
     tmp_root: Path,
     frozen_hashes: dict[str, str],
+    *,
+    deadline: float | None = None,
 ) -> GateResult:
     weight = RUBRIC["G9"]["weight"]
     reseed_dir = tmp_root / "reseed"
@@ -841,7 +961,7 @@ def gate_g9_reseed(
     seed = 20260417
     if original_seed is not None and _journal_value_matches(original_seed, str(seed)):
         seed += 1
-    rc = run_docker_flow(reseed_dir, routing_seed=seed)
+    rc = run_docker_flow(reseed_dir, routing_seed=seed, deadline=deadline)
     if rc != 0:
         return GateResult("G9", RUBRIC["G9"]["name"], weight, 0.0, False, f"reseed flow exited {rc}")
 
@@ -944,9 +1064,7 @@ def main() -> int:
         print(json.dumps(payload))
         return 1
     if not reference_dir.exists():
-        payload = {"score": 0.0, "normalized_score": 0.0, "passed": False, "error": f"reference dir missing: {reference_dir}"}
-        print(json.dumps(payload))
-        return 1
+        raise FileNotFoundError(f"reference dir missing: {reference_dir}")
 
     work_root = args.work_dir.resolve() if args.work_dir else Path(tempfile.mkdtemp(prefix="orfs_ibex_eval_"))
     starter_unpack_root = work_root / "starter_unpack"
@@ -976,27 +1094,37 @@ def main() -> int:
     shutil.copy(submission_journal, graded_dir / "JOURNAL.md")
     _copy_audit_trail(submission_dir, graded_dir)
 
-    if args.skip_docker_unsafe:
-        print("[warning] running in skip-docker debug mode", file=sys.stderr)
-        _copy_debug_flow_outputs(submission_dir, graded_dir)
-    else:
-        rc = run_docker_flow(graded_dir)
-        if rc != 0:
-            print(f"[warn] graded flow exited {rc}; scoring what exists in the tree", file=sys.stderr)
+    deadline = time.monotonic() + FLOW_WALL_BUDGET_S
+    try:
+        if args.skip_docker_unsafe:
+            print("[warning] running in skip-docker debug mode", file=sys.stderr)
+            _copy_debug_flow_outputs(submission_dir, graded_dir)
+        else:
+            rc = run_docker_flow(graded_dir, deadline=deadline)
+            if rc != 0:
+                print(f"[warn] graded flow exited {rc}; scoring what exists in the tree", file=sys.stderr)
 
-    report = score_submission(graded_dir, starter_dir, frozen_hashes)
+        report = score_submission(graded_dir, starter_dir, frozen_hashes)
 
-    if not args.skip_docker_unsafe and not args.skip_reseed:
-        g9 = gate_g9_reseed(
-            starter_dir,
-            graded_dir / "flow" / "designs" / "sky130hd" / "ibex" / "config.mk",
-            graded_dir / "JOURNAL.md",
-            work_root,
-            frozen_hashes,
-        )
-    else:
-        reason = "--skip-docker-unsafe" if args.skip_docker_unsafe else "--skip-reseed"
-        g9 = GateResult("G9", RUBRIC["G9"]["name"], RUBRIC["G9"]["weight"], 0.0, False, f"reseed skipped ({reason})")
+        if not args.skip_docker_unsafe and not args.skip_reseed:
+            g9 = gate_g9_reseed(
+                starter_dir,
+                graded_dir / "flow" / "designs" / "sky130hd" / "ibex" / "config.mk",
+                graded_dir / "JOURNAL.md",
+                work_root,
+                frozen_hashes,
+                deadline=deadline,
+            )
+        else:
+            reason = "--skip-docker-unsafe" if args.skip_docker_unsafe else "--skip-reseed"
+            g9 = GateResult("G9", RUBRIC["G9"]["name"], RUBRIC["G9"]["weight"], 0.0, False, f"reseed skipped ({reason})")
+    except FlowBudgetExceeded as exc:
+        print(json.dumps({
+            "score": 0.0, "total_score": 0.0, "normalized_score": 0.0, "passed": False,
+            "reason": str(exc), "status": "computation_budget_exhausted",
+            "flow_wall_budget_s": FLOW_WALL_BUDGET_S, "work_dir": str(work_root),
+        }))
+        return 1
     report.add(g9)
 
     finalize(report)
