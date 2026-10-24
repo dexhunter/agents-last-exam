@@ -152,7 +152,7 @@ wrong `BOOTSTRAP.md`, so the skip never took effect.)
 | `cli_version` | Exact official npm release, default `2026.10.5` |
 | `tarball_path` | Optional custom package tarball inside the sandbox |
 | `tarball_url` | Optional package URL when `tarball_path` is empty or missing |
-| `llm_idle_timeout_s` | Legacy option, unsupported by the current official release |
+| `llm_idle_timeout_s` | Optional provider request and LLM idle timeout in seconds; requires `base_url` |
 | `cua_plugin_path` | Path to CUA plugin source directory (default: `/opt/ale/openclaw-cua-plugin`) |
 | `cua_plugin_repo` | Git URL to clone CUA plugin source from when `cua_plugin_path` is missing (default: `https://github.com/cua-verse/openclaw.git`) |
 | `cua_plugin_branch` | Branch to clone for CUA plugin source (default: `agenthle`) |

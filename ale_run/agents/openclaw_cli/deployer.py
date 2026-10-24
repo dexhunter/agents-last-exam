@@ -58,6 +58,8 @@ _FINAL_EXIT_GRACE_S = 10.0
 _STATE_READ_TIMEOUT_S = 15.0
 _SUBAGENT_POLL_S = 1.0
 _SUBAGENT_SETTLE_S = 3.0
+_GATEWAY_START_TIMEOUT_S = 180.0
+_GATEWAY_HEALTH_COMMAND_TIMEOUT_S = 30.0
 _AGENT_ID = "main"
 _PLUGIN_PROVIDER_IDS = frozenset({"anthropic", "openai", "openrouter", "zai"})
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -614,6 +616,25 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         # id (bare, no provider prefix); openclaw surfaces them as
         # ``<provider>/<id>``. We register the primary (and vision) model ids.
         provider_catalogs: dict[str, dict] = {}
+        if any(value is not None for value in (
+            cfg.model_input_types, cfg.model_context_window,
+            cfg.model_max_tokens, cfg.model_reasoning,
+        )) and not cfg.base_url:
+            raise ValueError("openclaw_cli: primary model metadata requires base_url")
+        if cfg.llm_idle_timeout_s is not None and not cfg.base_url:
+            raise ValueError("openclaw_cli: llm_idle_timeout_s requires base_url")
+        if cfg.llm_idle_timeout_s is not None and (
+            isinstance(cfg.llm_idle_timeout_s, bool)
+            or not isinstance(cfg.llm_idle_timeout_s, int)
+            or cfg.llm_idle_timeout_s <= 0
+        ):
+            raise ValueError("openclaw_cli: llm_idle_timeout_s must be a positive integer")
+        for name, value in (
+            ("model_context_window", cfg.model_context_window),
+            ("model_max_tokens", cfg.model_max_tokens),
+        ):
+            if value is not None and (isinstance(value, bool) or value <= 0):
+                raise ValueError(f"openclaw_cli: {name} must be positive")
         route_catalog_specs = [
             (
                 provider,
@@ -655,6 +676,8 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 if catalog_provider == "zai" or catalog_api:
                     existing["api"] = catalog_api or "openai-completions"
                 provider_catalogs[catalog_provider] = existing
+            if catalog_provider == provider and cfg.llm_idle_timeout_s is not None:
+                existing["timeoutSeconds"] = cfg.llm_idle_timeout_s
             if (
                 catalog_provider
                 == getattr(self, "_vision_usage_proxy_provider", None)
@@ -667,12 +690,16 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     "id": catalog_id,
                     "name": catalog_name or catalog_id,
                 }
-                if (
-                    cfg.provider == "custom"
-                    and catalog_provider == provider
-                    and cfg.model_input_types is not None
-                ):
-                    model_entry["input"] = list(cfg.model_input_types)
+                if catalog_provider == provider and catalog_model == primary_route_model:
+                    if cfg.model_input_types is not None:
+                        model_entry["input"] = list(cfg.model_input_types)
+                    if cfg.model_context_window is not None:
+                        model_entry["contextWindow"] = cfg.model_context_window
+                        model_entry["contextTokens"] = cfg.model_context_window
+                    if cfg.model_max_tokens is not None:
+                        model_entry["maxTokens"] = cfg.model_max_tokens
+                    if cfg.model_reasoning is not None:
+                        model_entry["reasoning"] = cfg.model_reasoning
                 if (
                     catalog_provider
                     == getattr(self, "_vision_usage_proxy_provider", None)
@@ -893,10 +920,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     or set(plugin.get("toolNames", ())) != set(CUA_TOOL_NAMES)):
                 raise RuntimeError("openclaw_cli: CUA plugin failed to load all required tools: "
                                    + str(plugin.get("error") or plugin.get("toolNames")))
-            logger.warning(
-                "openclaw_cli: llm_idle_timeout_s is unsupported by official OpenClaw %s; "
-                "the upstream model timeout policy applies", cfg.cli_version,
-            )
             # 6. Pre-warm the bundled-plugin runtime-deps mirror.
             await self._prewarm_plugin_runtime_mirror(cfg)
         except BaseException:
@@ -975,21 +998,23 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         try:
             if os.name == "nt":
                 job = assign_job(proc.pid)
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + _GATEWAY_START_TIMEOUT_S
             while time.monotonic() < deadline:
                 if proc.returncode is not None:
                     raise RuntimeError(f"OpenClaw gateway exited with code {proc.returncode}")
                 try:
                     check = await command(
-                        self._launch_prefix() + ["gateway", "call", "health", "--json", "--timeout", "2000"],
-                        env=env, timeout=6,
+                        self._launch_prefix() + ["gateway", "call", "health", "--json", "--timeout", "10000"],
+                        env=env, timeout=_GATEWAY_HEALTH_COMMAND_TIMEOUT_S,
                     )
                     if check.returncode == 0:
                         return proc, job
                 except asyncio.TimeoutError:
                     pass
                 await asyncio.sleep(1)
-            raise RuntimeError("OpenClaw gateway did not become ready within 90 seconds")
+            raise RuntimeError(
+                f"OpenClaw gateway did not become ready within {_GATEWAY_START_TIMEOUT_S:g} seconds"
+            )
         except BaseException:
             await stop_process(proc, job, _TERM_GRACE_S)
             raise

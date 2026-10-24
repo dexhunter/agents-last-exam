@@ -99,9 +99,16 @@ class OpenClawCliConfig:
     disable only for an endpoint that rejects that request field."""
 
     model_input_types: tuple[str, ...] | None = None
-    """Input modalities declared for a custom provider model. Add ``"image"``
-    when the primary model accepts screenshots natively. ``None`` leaves the
-    provider's existing/default model catalog behavior unchanged."""
+    """Input modalities declared for the primary provider model."""
+
+    model_context_window: int | None = None
+    """Native and effective context size for the configured primary model."""
+
+    model_max_tokens: int | None = None
+    """Provider-reported maximum output tokens for the primary model."""
+
+    model_reasoning: bool | None = None
+    """Whether the configured primary model supports reasoning."""
 
     sanitize_empty_text_blocks: bool = False
     """Route a custom OpenAI-compatible provider through an ALE loopback proxy
@@ -120,9 +127,8 @@ class OpenClawCliConfig:
     # openclaw_cli_openrouter_gpt-5_4.yaml: timeout_seconds: 600.
     agent_timeout_s: int = 600
 
-    # Retained for existing experiment configs. Official OpenClaw 2026.10.5
-    # no longer exposes this setting; the upstream timeout policy applies.
-    llm_idle_timeout_s: int = 180
+    llm_idle_timeout_s: int | None = None
+    """Provider request and LLM idle timeout in seconds; requires ``base_url``."""
 
     # Provider-specific accepted values are validated by OpenClaw.
     thinking: str = "high"
