@@ -219,7 +219,7 @@ limits, and budget, including retained sandboxes. Auto-resume skips prior
 the current task-folder SHA256 and `eval_result.json` confirms a successful,
 error-free evaluation with the same numeric score. Unscored evaluation timeouts
 are not complete. Missing or changed hashes rerun; see the
-[v1 log upgrade helper](releases/v1.1.md#upgrade-existing-logs) for legacy logs.
+[v1 log reuse guidance](releases/v1.1.md#upgrade-existing-logs) for legacy logs.
 Failed units retry up to `max_attempts`. Use `--disable-resume` to run every
 selected unit once without retries.
 

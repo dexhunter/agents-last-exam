@@ -103,26 +103,18 @@ max_attempts: 3</code></pre>
       images, data, and task list</a>. In custom QEMU profiles, rename
       <code>hf_revision</code> to <code>image_revision</code>, keeping the same
       pin. Set <code>tasks: selected_tasks/v1.1_modified.txt</code> and use a
-      fresh <code>output.root</code> to run the 57 updated tasks. Reuse valid
-      matching v1 results for the other 65 tasks, and exclude the 30 retired tasks.
+      fresh <code>output.root</code> to run the 57 tasks modified at release.
+      The other 65 active tasks were unchanged at release. Reuse valid v1
+      results only when the task, data, environment and agent configuration
+      match, and exclude the 30 retired tasks. Later task changes may require
+      another run. Keep original records intact; resume reruns records without
+      a matching task hash rather than importing them automatically.
     </p>
-    <p>
-      To resume the full v1.1 task list in the same log root, stop the experiment
-      and use the <a href="https://github.com/rdi-berkeley/agents-last-exam/blob/main/releases/v1.1/upgrade.json">fixed task map</a>
-      with the helper. The helper previews by
-      default; applying removes changed or retired task logs and stamps retained, unmodified legacy
-      logs with the current revision. Apply it only to v1 logs, before rerunning v1.1 tasks.
-      Back up logs you want to preserve first.
-      Then resume with the same experiment name and <code>output.root</code>:
-    </p>
-    <pre><code>uv run python scripts/upgrade_v1_logs.py LOG_ROOT
-uv run python scripts/upgrade_v1_logs.py LOG_ROOT --apply
-uv run python -m ale_run run my_experiment.yaml</code></pre>
     <p>
       To run v1 instead, follow
       <a href="https://github.com/rdi-berkeley/agents-last-exam/blob/main/docs/releases/v1.md">Run original v1</a>.
       Use the tagged code, legacy images and fresh logs; do not reuse v1.1
-      results or apply the log upgrade helper to that run.
+      results for that run.
     </p>
 
     <h2 id="output-path">Choose where task output goes</h2>

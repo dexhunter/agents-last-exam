@@ -243,7 +243,6 @@
       "verification": 43,
       "environment": 32,
       "data": 23
-    },
-    "task_change_manifest": "releases/v1.1/upgrade.json"
+    }
   }
 }
