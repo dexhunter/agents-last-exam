@@ -24,29 +24,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-# Built-in Claude Code tools that break headless (`-p`) runs. Mirrors the
-# default disabled_tools list shipped in agenthle's claude_code_openrouter.yaml
-# — passed to the CLI as repeated ``--disallowedTools`` flags. Each either
-# blocks on human interaction or mutates persistent session state with no
-# headless equivalent, so leaving them enabled risks deadlocks.
-_DISABLED_TOOLS = (
-    # Plan mode needs interactive user approval (ExitPlanMode waits for a
-    # human accept) — deadlocks headless runs.
-    "EnterPlanMode",
-    "ExitPlanMode",
-    # Worktree tools mutate session CWD with persistent side effects.
-    "EnterWorktree",
-    "ExitWorktree",
-    # Pure user-interaction tool — no headless equivalent.
-    "AskUserQuestion",
-    # Background task lifecycle (no running task ID exists in headless).
-    "TaskOutput",
-    "TaskStop",
-    # Requires a logged-in claude.ai account; benchmark VMs are not.
-    "RemoteTrigger",
-)
-
-
 @dataclass
 class ClaudeCodeConfig:
     """Tunables for :class:`ClaudeCodeDeployer`.
@@ -92,11 +69,13 @@ class ClaudeCodeConfig:
 
     # ---- CLI knobs ----
     max_budget_usd: float | None = None
+    context_window: int | None = None
+    auto_compact_token_limit: int | None = None
     max_output_tokens: int | None = None
     """Maximum output tokens requested from the model through Claude Code's
     ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` environment variable. ``None`` leaves the
     CLI default unchanged."""
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS
+    disabled_tools: tuple[str, ...] = ()
     dangerously_skip_permissions: bool = True
 
     otel_enabled: bool = True
@@ -146,8 +125,14 @@ class ClaudeCodeConfig:
     is left to the model's adaptive default."""
 
     # ---- documentation ----
-    cli_version: str = "@anthropic-ai/claude-code@2.1.170"
+    cli_version: str = "@anthropic-ai/claude-code@2.1.280"
     """Full npm spec of the pinned CLI. The deployer probes the installed
     ``claude --version`` against the version encoded here and (re)installs
     via npm when missing or mismatched — so bumping this is sufficient to
     upgrade images with an older claude pre-baked."""
+
+    def __post_init__(self) -> None:
+        if self.context_window is not None and self.context_window <= 0:
+            raise ValueError("context_window must be positive")
+        if self.auto_compact_token_limit is not None and self.auto_compact_token_limit <= 0:
+            raise ValueError("auto_compact_token_limit must be positive")

@@ -27,4 +27,4 @@ class KimiCodeConfig:
     otel_enabled: bool = True
     disable_auto_update: bool = True
 
-    cli_version: str = "@moonshot-ai/kimi-code@0.27.0"
+    cli_version: str = "@moonshot-ai/kimi-code@2.2.0"

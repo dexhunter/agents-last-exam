@@ -1,29 +1,12 @@
 """DroidConfig: per-episode knobs for the Factory.ai ``droid`` CLI deployer.
 
-Auth: ``FACTORY_API_KEY`` sentinel (``byok-noop``) satisfies the CLI's
-auth gate.  Actual model calls route via OpenRouter using
-``OPENROUTER_API_KEY`` configured in ``settings.json``.
+Factory authentication uses ``FACTORY_API_KEY`` or an authenticated CLI
+session. Model calls use the provider key configured in ``settings.json``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import ClassVar
-
-# Deny-only tool policy: only disabled tools are listed (no allow list). WebSearch
-# is intentionally NOT disabled — internet is allowed, so web access is on.
-_DISABLED_TOOLS = (
-    "squad-board",
-    "slack_post_message",
-    "store_agent_readiness_report",
-    "GenerateDroid",
-    "ProposeMission",
-    "StartMissionRun",
-    "EndFeatureRun",
-    "DismissHandoffItems",
-    "ExitSpecMode",
-    "AskUser",
-)
-
 
 @dataclass
 class DroidConfig:
@@ -38,6 +21,7 @@ class DroidConfig:
     # agenthle droid_openrouter_claude_opus_4_7.yaml: anthropic/claude-opus-4.7
     # (alt droid_openrouter_gpt5_5.yaml: openai/gpt-5.5).
     model: str = "anthropic/claude-opus-4.7"
+    cli_version: str = "0.244.0"
 
     # ---- routing (no secrets — API keys come from shell env) ----
     provider: str = "openrouter"
@@ -71,4 +55,4 @@ class DroidConfig:
     # higher values get a hard 400 on the first call).
     max_output_tokens: int = 128000
     byok_provider: str = "generic-chat-completion-api"
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS
+    disabled_tools: tuple[str, ...] = ()

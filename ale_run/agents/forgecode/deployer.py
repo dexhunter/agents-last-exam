@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -77,7 +78,16 @@ class ForgecodeDeployer(BaseAgentDeployer):
 
     @property
     def version(self) -> str | None:
-        return self._forge_version if hasattr(self, "_forge_version") else None
+        return self.config.cli_version
+
+    @staticmethod
+    def _installed_version(path: str) -> str | None:
+        try:
+            probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.search(r"\b\d+\.\d+\.\d+\b", probe.stdout or "")
+        return match.group() if probe.returncode == 0 and match else None
 
     # =========================================================================
     # install
@@ -86,15 +96,17 @@ class ForgecodeDeployer(BaseAgentDeployer):
     async def _auto_install_cli(self) -> None:
         """Download the forge binary from GitHub releases.
 
-        Downloads a PINNED version (``cfg.forge_version``) from
+        Downloads a PINNED version (``cfg.cli_version``) from
         ``releases/download/v<version>/`` — never ``releases/latest`` — so
         every environment runs the same validated binary. forge's ``-p`` mode
         self-updates to latest on startup otherwise; the ``[updates]`` block
         in forge.toml disables that, and this pin governs fresh installs.
-        Falls back to cargo install from source if the binary download fails.
+        Fails if the pinned download fails.
         """
         cfg: ForgecodeConfig = self.config  # type: ignore[assignment]
-        version = cfg.forge_version
+        version = cfg.cli_version
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ValueError(f"forgecode: invalid CLI version {version!r}")
         home = os.path.expanduser("~")
         bin_dir = f"{home}/.local/bin"
         os.makedirs(bin_dir, exist_ok=True)
@@ -121,33 +133,12 @@ class ForgecodeDeployer(BaseAgentDeployer):
                 (proc.stdout or "").strip()[-200:],
             )
         else:
-            logger.warning(
-                "forgecode: GitHub releases download failed (rc=%d), "
-                "trying cargo install ...",
-                proc.returncode,
+            raise RuntimeError(
+                f"forgecode: pinned download failed (rc={proc.returncode}): "
+                f"{(proc.stderr or '')[:300]}"
             )
-            # Fallback: cargo install from source (requires Rust toolchain).
-            cargo_proc = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    "bash", "-c",
-                    "cargo install "
-                    "--git https://github.com/tailcallhq/forgecode "
-                    "--bin forge forge_main",
-                ],
-                capture_output=True, text=True, timeout=600,
-            )
-            if cargo_proc.returncode != 0:
-                raise RuntimeError(
-                    f"forgecode install failed — both GitHub releases download "
-                    f"(rc={proc.returncode}: {(proc.stderr or '')[:300]}) and "
-                    f"cargo install (rc={cargo_proc.returncode}: "
-                    f"{(cargo_proc.stderr or '')[:300]}) failed"
-                )
-            logger.info("forgecode: installed via cargo install")
 
-        if bin_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
+        os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
 
     async def install(self) -> None:
         cfg: ForgecodeConfig = self.config  # type: ignore[assignment]
@@ -158,21 +149,15 @@ class ForgecodeDeployer(BaseAgentDeployer):
         # ----------------------------------------------------------
         # 1. Ensure forge binary is available
         # ----------------------------------------------------------
-        # IMPORTANT: prefer a PRE-BAKED forge before downloading. The sandbox
-        # entry runs WITHOUT a login shell, so ~/.local/bin is not on PATH and
-        # shutil.which("forge") misses an image-baked binary — which would make
-        # us re-download forge `latest`. Newer forge (>=2.13.3) DROPPED reading
-        # API keys from env vars and hangs on "Migrating credentials" headless,
-        # so re-downloading silently breaks the agent. Check the baked location
-        # explicitly first.
         forge_path = shutil.which("forge")
         if not forge_path:
             baked = os.path.join(os.path.expanduser("~"), ".local", "bin", "forge")
             if os.path.isfile(baked) and os.access(baked, os.X_OK):
                 forge_path = baked
                 logger.info("forgecode: using pre-baked forge at %s", baked)
-        if not forge_path:
-            logger.info("forgecode: 'forge' not on PATH or baked dir, installing ...")
+        installed = await asyncio.to_thread(self._installed_version, forge_path) if forge_path else None
+        if installed != cfg.cli_version:
+            logger.info("forgecode: installed version %s; installing %s", installed, cfg.cli_version)
             await self._auto_install_cli()
             forge_path = shutil.which("forge") or (
                 os.path.join(os.path.expanduser("~"), ".local", "bin", "forge")
@@ -184,8 +169,12 @@ class ForgecodeDeployer(BaseAgentDeployer):
                     "ForgecodeDeployer: 'forge' still not found after install"
                 )
         self._forge_path = forge_path
-        self._forge_version = "(skipped — overlay2 ETXTBSY)"
-        logger.info("forgecode: binary at %s, skipping version probe", forge_path)
+        installed = await asyncio.to_thread(self._installed_version, forge_path)
+        if installed != cfg.cli_version:
+            raise RuntimeError(f"forgecode: installed version {installed!r} != {cfg.cli_version!r}")
+        self.actual_cli_version = installed
+        self.cli_source = "official"
+        logger.info("forgecode: binary at %s, version %s", forge_path, installed)
 
         # ----------------------------------------------------------
         # 2. Stage work dir

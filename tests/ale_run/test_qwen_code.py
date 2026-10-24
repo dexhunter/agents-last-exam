@@ -87,6 +87,17 @@ def test_settings_and_environment(tmp_path, monkeypatch, linux):
     assert d.config.api_key not in json.dumps(settings)
     assert len(" ".join(d._build_argv("x" * 100000))) < 2000
     assert "get_goal" not in " ".join(d._build_argv())
+    assert "--exclude-tools" not in d._build_argv()
+    assert "--allowed-mcp-server-names" not in d._build_argv()
+
+
+def test_explicit_tool_exclusions_are_forwarded(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    d = adapter(tmp_path, disabled_tools=("ask_user_question", "enter_plan_mode"))
+    d._prepare_run()
+    d._node_path, d._qwen_path = "node", "qwen"
+    argv = d._build_argv()
+    assert argv[argv.index("--exclude-tools") + 1] == "ask_user_question,enter_plan_mode"
 
 
 async def test_missing_gui_bridge_fails_install(tmp_path, monkeypatch):

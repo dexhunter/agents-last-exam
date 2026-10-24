@@ -11,9 +11,8 @@ gemini -p - --output-format stream-json
 The deployer enables the Gemini CLI built-in shell/file tools
 (`run_shell_command`, `read_file`, `write_file`, `replace`, `list_directory`,
 `glob`, `grep_search`, `read_many_files`, background-process tools) and adds
-the CUA MCP tools through `~/.gemini/settings.json`. Only web /
-persistent-state / interactive / tracker built-ins are listed in
-`disabled_tools` and written to Gemini's `settings.tools.exclude`.
+the CUA MCP tools through `~/.gemini/settings.json`. `disabled_tools` is empty
+by default; explicit exclusions are written to Gemini's `settings.tools.exclude`.
 
 Headless runs use `gemini -p`, so there is no UI that can answer permission
 prompts. The deployer writes `~/.gemini/agenthle_policy.toml` and passes
@@ -82,7 +81,7 @@ class GeminiCliConfig:
     model: str = "gemini-3.1-pro-preview"
     provider: str = "openrouter"  # "openrouter" | "google"
     approval_mode: str = "yolo"
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS  # deny-only; no allow list
+    disabled_tools: tuple[str, ...] = ()
     npm_package: str = ".../v0.38.1-agenthle/google-gemini-cli-0.38.1.tgz"
     compression_model: str = "google/gemini-3-flash-preview"
 ```

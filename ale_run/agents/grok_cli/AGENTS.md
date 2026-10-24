@@ -128,21 +128,8 @@ NDJSON events, one JSON object per line:
 
 ## Tool Classification
 
-Grok CLI exposes **54 native tools**. Of these, 21 are disabled via
-`disabledTools` in `user-settings.json` (written by the deployer from the
-`disabled_tools` config field, defaulting to `_DISABLED_TOOLS_OPENROUTER`).
-The remaining **33 tools** are available to the agent at runtime. The fork's
-`filterDisabledTools()` removes them before the agent starts, so the model
-never sees them.
-
-### Disabled Tools (21)
-
-| Category | Tools | Reason |
-|----------|-------|--------|
-| xAI Responses API | `search_web`, `search_x`, `generate_image`, `generate_video` | Requires xAI-exclusive APIs |
-| agent-desktop | `computer_snapshot`, `computer_screenshot`, `computer_click`, `computer_mouse_move`, `computer_type`, `computer_press`, `computer_scroll`, `computer_launch`, `computer_list_windows`, `computer_focus_window`, `computer_wait`, `computer_get` | Requires unpublished binary |
-| Payment/wallet | `wallet_info`, `wallet_history`, `fetch_payment_info`, `paid_request` | No wallet on VMs; `paid_request` crashes headless mode |
-| LSP | `lsp` | No language server on VMs |
+Grok CLI exposes native tools alongside the CUA bridge. The deployer excludes
+none by default; some require xAI services, credentials, or an interactive client.
 
 ## Known Issue: `needsApproval` Crashes Headless Mode
 
@@ -152,9 +139,8 @@ the NDJSON emitter has no handler for it -- falls through to `default: break`,
 nobody calls `respondToToolApproval()`, the stream terminates, and the process
 exits silently (exit 0).
 
-**Fix**: The fork adds `disabledTools` support in `user-settings.json`. The
-deployer writes the `disabled_tools` list from config, so `paid_request`
-and other problematic tools are removed before the agent starts.
+The fork supports explicit `disabledTools` in `user-settings.json`, but the
+default leaves the list empty, so this headless limitation remains possible.
 
 ## Known Issue: Delegate Sub-Agent Model ID
 

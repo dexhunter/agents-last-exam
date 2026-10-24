@@ -68,9 +68,9 @@ are preserved. Windows uses a short working directory to avoid long native chat
 paths. The harness records its effective settings in `qwen-settings.json`.
 Prompts are read through stdin from a file, avoiding Windows command-line limits.
 
-Headless execution uses `--approval-mode yolo`, disables interactive question
-and plan-approval tools, and limits MCP discovery to `cua`. Other built-in tools,
-including web and subagent tools, retain upstream behavior. The bundled
+Headless execution uses `--approval-mode yolo` and does not exclude tools or
+restrict MCP discovery by default. Interactive tools may not work in headless
+mode. The bundled
 `computer-use` and `browser-use` skills target Qwen's separate Node REPL/SDK
 setup and are disabled in ALE. An appended system instruction directs GUI work
 to the already configured `cua` tools and screenshot observations. The pinned CLI skips

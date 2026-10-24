@@ -32,7 +32,7 @@ fully headless.
 ```bash
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 # installs to ~/.local/bin/agy
-~/.local/bin/agy --version   # expected: 1.1.25
+~/.local/bin/agy --version   # expected: 1.4.1
 ```
 
 ### 2. Log in with your Google account
@@ -109,24 +109,24 @@ uv run python -m ale_run run my_exp.yaml
 preset's `model:` field:
 
 ```
-Gemini 3.1 Pro (High)        Gemini 3.7 Flash (High)
-Claude Sonnet 4.6 (Thinking) Claude Opus 4.6 (Thinking)
+Gemini 4 Argon (High)        Gemini 3.8 Flash (High)
+Claude Sonnet 5.5 (High)     Claude Opus 5.5 (High)
 GPT-OSS 120B (Medium)
 ```
 
 Which models you can use — and how much — depends on your Google plan. **Quota
 is per account AND per model**, so if one model is throttled another may still
-work (e.g. Gemini exhausted but Claude Sonnet 4.6 fine).
+work (e.g. Gemini exhausted but Claude Sonnet 5.5 fine).
 
 ## Config
 
 ```yaml
 # configs/agents/antigravity_cli.yaml
 harness: antigravity_cli
-model: Claude Sonnet 4.6 (Thinking)
+model: Claude Sonnet 5.5 (High)
 config:
   dangerously_skip_permissions: true   # required headless
-  cli_version: "1.1.25"                # pinned official release
+  cli_version: "1.4.1"                 # pinned official release
   print_timeout: "120m"                 # ALE wall time remains authoritative
   download_url: ""                      # optional custom archive/binary
   download_sha512: ""                   # required with a custom URL
@@ -152,7 +152,7 @@ account.
 - **Runs 429 with `Individual quota reached … please upgrade your
   subscription`** → you're on a **free-tier** account (the "upgrade" wording is
   the tell), or that model's quota is spent. Either switch `model:` to one with
-  quota left (e.g. `Claude Sonnet 4.6 (Thinking)`), or re-login with the right
+  quota left (e.g. `Claude Sonnet 5.5 (High)`), or re-login with the right
   account: delete `~/.gemini/antigravity-cli/antigravity-oauth-token` and redo
   step 2.
 - **Windows GUI tasks**: the CUA tools load reliably (the deployer warms up the

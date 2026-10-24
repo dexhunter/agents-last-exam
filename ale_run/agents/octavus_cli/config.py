@@ -89,7 +89,7 @@ class OctavusCliConfig:
     uses a baked ``google-chrome``; set this only to pin your own CfT/Chromium."""
 
     # ---- install ----
-    cli_version: str | None = "@octavus/agent@1.0.10"
+    cli_version: str | None = "@octavus/agent@1.0.32"
     """npm spec installed globally at setup. Pin a version for reproducibility;
     ``None`` installs the latest ``@octavus/agent``. ``--thinking`` needs
     ``>=1.0.10``."""

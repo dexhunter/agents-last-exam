@@ -10,11 +10,13 @@ Output: JSON envelope on stdout or stderr, plus the agent session transcript.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -23,6 +25,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 from ale_run.base_interface import (
@@ -53,9 +56,10 @@ _POLL_INTERVAL_S = 2.0
 _TERM_GRACE_S = 2.0
 _FINAL_EXIT_GRACE_S = 10.0
 _STATE_READ_TIMEOUT_S = 15.0
-_SUBAGENT_DELIVERY_TIMEOUT_S = 60.0
 _SUBAGENT_POLL_S = 1.0
 _SUBAGENT_SETTLE_S = 3.0
+_GATEWAY_START_TIMEOUT_S = 180.0
+_GATEWAY_HEALTH_COMMAND_TIMEOUT_S = 30.0
 _AGENT_ID = "main"
 _PLUGIN_PROVIDER_IDS = frozenset({"anthropic", "openai", "openrouter", "zai"})
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -612,6 +616,25 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         # id (bare, no provider prefix); openclaw surfaces them as
         # ``<provider>/<id>``. We register the primary (and vision) model ids.
         provider_catalogs: dict[str, dict] = {}
+        if any(value is not None for value in (
+            cfg.model_input_types, cfg.model_context_window,
+            cfg.model_max_tokens, cfg.model_reasoning,
+        )) and not cfg.base_url:
+            raise ValueError("openclaw_cli: primary model metadata requires base_url")
+        if cfg.llm_idle_timeout_s is not None and not cfg.base_url:
+            raise ValueError("openclaw_cli: llm_idle_timeout_s requires base_url")
+        if cfg.llm_idle_timeout_s is not None and (
+            isinstance(cfg.llm_idle_timeout_s, bool)
+            or not isinstance(cfg.llm_idle_timeout_s, int)
+            or cfg.llm_idle_timeout_s <= 0
+        ):
+            raise ValueError("openclaw_cli: llm_idle_timeout_s must be a positive integer")
+        for name, value in (
+            ("model_context_window", cfg.model_context_window),
+            ("model_max_tokens", cfg.model_max_tokens),
+        ):
+            if value is not None and (isinstance(value, bool) or value <= 0):
+                raise ValueError(f"openclaw_cli: {name} must be positive")
         route_catalog_specs = [
             (
                 provider,
@@ -653,6 +676,8 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 if catalog_provider == "zai" or catalog_api:
                     existing["api"] = catalog_api or "openai-completions"
                 provider_catalogs[catalog_provider] = existing
+            if catalog_provider == provider and cfg.llm_idle_timeout_s is not None:
+                existing["timeoutSeconds"] = cfg.llm_idle_timeout_s
             if (
                 catalog_provider
                 == getattr(self, "_vision_usage_proxy_provider", None)
@@ -665,12 +690,16 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     "id": catalog_id,
                     "name": catalog_name or catalog_id,
                 }
-                if (
-                    cfg.provider == "custom"
-                    and catalog_provider == provider
-                    and cfg.model_input_types is not None
-                ):
-                    model_entry["input"] = list(cfg.model_input_types)
+                if catalog_provider == provider and catalog_model == primary_route_model:
+                    if cfg.model_input_types is not None:
+                        model_entry["input"] = list(cfg.model_input_types)
+                    if cfg.model_context_window is not None:
+                        model_entry["contextWindow"] = cfg.model_context_window
+                        model_entry["contextTokens"] = cfg.model_context_window
+                    if cfg.model_max_tokens is not None:
+                        model_entry["maxTokens"] = cfg.model_max_tokens
+                    if cfg.model_reasoning is not None:
+                        model_entry["reasoning"] = cfg.model_reasoning
                 if (
                     catalog_provider
                     == getattr(self, "_vision_usage_proxy_provider", None)
@@ -891,10 +920,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     or set(plugin.get("toolNames", ())) != set(CUA_TOOL_NAMES)):
                 raise RuntimeError("openclaw_cli: CUA plugin failed to load all required tools: "
                                    + str(plugin.get("error") or plugin.get("toolNames")))
-            logger.warning(
-                "openclaw_cli: llm_idle_timeout_s is unsupported by official OpenClaw %s; "
-                "the upstream model timeout policy applies", cfg.cli_version,
-            )
             # 6. Pre-warm the bundled-plugin runtime-deps mirror.
             await self._prewarm_plugin_runtime_mirror(cfg)
         except BaseException:
@@ -973,21 +998,23 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         try:
             if os.name == "nt":
                 job = assign_job(proc.pid)
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + _GATEWAY_START_TIMEOUT_S
             while time.monotonic() < deadline:
                 if proc.returncode is not None:
                     raise RuntimeError(f"OpenClaw gateway exited with code {proc.returncode}")
                 try:
                     check = await command(
-                        self._launch_prefix() + ["gateway", "call", "health", "--json", "--timeout", "2000"],
-                        env=env, timeout=6,
+                        self._launch_prefix() + ["gateway", "call", "health", "--json", "--timeout", "10000"],
+                        env=env, timeout=_GATEWAY_HEALTH_COMMAND_TIMEOUT_S,
                     )
                     if check.returncode == 0:
                         return proc, job
                 except asyncio.TimeoutError:
                     pass
                 await asyncio.sleep(1)
-            raise RuntimeError("OpenClaw gateway did not become ready within 90 seconds")
+            raise RuntimeError(
+                f"OpenClaw gateway did not become ready within {_GATEWAY_START_TIMEOUT_S:g} seconds"
+            )
         except BaseException:
             await stop_process(proc, job, _TERM_GRACE_S)
             raise
@@ -1002,8 +1029,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
         agent_db = self._state_dir / "agents" / _AGENT_ID / "agent" / "openclaw-agent.sqlite"
         settled_at = None
         read_error_since = None
-        missing_since = time.monotonic()
-        archived_since: dict[str, float] = {}
         delivered: set[str] = set()
         while True:
             if gateway is not None and gateway.returncode is not None:
@@ -1013,8 +1038,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                     rows = db.execute("SELECT run_id, payload_json FROM subagent_runs").fetchall()
                 runs = {run_id: json.loads(payload) for run_id, payload in rows}
                 missing = expected.keys() - runs.keys()
-                if not runs and not missing:
-                    return
                 unfinished = any(
                     run.get("execution", {}).get("status") != "terminal"
                     or run.get("delivery", {}).get("status") not in {
@@ -1034,19 +1057,13 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                         run_id for run_id in missing
                         if expected[run_id].get("childSessionKey") not in archives
                     }
-                    if absent:
-                        if time.monotonic() - missing_since > _STATE_READ_TIMEOUT_S:
-                            raise RuntimeError("OpenClaw did not persist an accepted subagent run")
-                        await asyncio.sleep(_SUBAGENT_POLL_S)
-                        continue
                     active = db.execute(
                         "SELECT COUNT(*) FROM session_nodes WHERE status IN ('running', 'active')"
                     ).fetchone()[0]
-                    pending_delivery = False
-                    for run_id in missing:
+                    pending_delivery = bool(absent)
+                    for run_id in missing - absent:
                         if expected[run_id].get("expectsCompletionMessage") is False:
                             continue
-                        archived_since.setdefault(run_id, time.monotonic())
                         if run_id not in delivered:
                             pattern = f"%{run_id}%"
                             delivered_row = db.execute(
@@ -1063,15 +1080,15 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                             if delivered_row:
                                 delivered.add(run_id)
                         if run_id not in delivered:
-                            if not active and time.monotonic() - archived_since[run_id] > _SUBAGENT_DELIVERY_TIMEOUT_S:
-                                raise RuntimeError("OpenClaw archived a subagent without a completion delivery")
                             pending_delivery = True
                 read_error_since = None
             except (sqlite3.Error, json.JSONDecodeError) as exc:
                 if read_error_since is None:
                     read_error_since = time.monotonic()
                 elif time.monotonic() - read_error_since >= _STATE_READ_TIMEOUT_S:
-                    raise RuntimeError("OpenClaw subagent state could not be read") from exc
+                    logger.warning("openclaw_cli: waiting for readable subagent state: %s", exc)
+                    read_error_since = time.monotonic()
+                settled_at = None
                 await asyncio.sleep(_SUBAGENT_POLL_S)
                 continue
             if unfinished or active or pending_delivery:
@@ -1117,8 +1134,6 @@ class OpenClawCliDeployer(BaseAgentDeployer):
             if session_key not in known:
                 rows.append((session_key, session_id, None, "archived", "{}"))
                 known.add(session_key)
-        if not rows and not expected:
-            return
         children_dir.mkdir(parents=True, exist_ok=True)
         children = []
         for session_key, session_id, parent_key, status, entry_json in rows:
@@ -1126,6 +1141,7 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 session_id = str(uuid.UUID(session_id))
                 entry = json.loads(entry_json or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
+                children.append({"session_key": session_key, "transcript": None})
                 continue
             destination = children_dir / f"{session_id}.jsonl"
             await self._export_session_transcript(session_id, destination)
@@ -1140,15 +1156,13 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 "model": entry.get("model"), "provider": entry.get("modelProvider"),
                 "transcript": destination.name if destination.exists() else None,
             })
-        for key in sorted(expected - {record["session_key"] for record in children}):
-            children.append({"session_key": key, "transcript": None})
         by_key = {record["session_key"]: record for record in children}
         main_key = ((envelope or {}).get("meta", {}).get("agentMeta", {}).get("sessionFile"))
         sources = [(main_key, wd / "transcript.jsonl")]
         sources.extend((record["session_key"], children_dir / record["transcript"])
                        for record in children if record.get("transcript"))
         for parent_key, transcript in sources:
-            if not parent_key or not transcript.is_file():
+            if not transcript.is_file():
                 continue
             for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
                 try:
@@ -1159,9 +1173,15 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 if isinstance(details, dict) and isinstance(details.get("result"), dict):
                     details = details["result"].get("details")
                 if isinstance(details, dict) and details.get("status") == "accepted":
-                    child = by_key.get(details.get("childSessionKey"))
-                    if child is not None:
+                    child_key = details.get("childSessionKey")
+                    if not isinstance(child_key, str):
+                        continue
+                    expected.add(child_key)
+                    child = by_key.get(child_key)
+                    if child is not None and parent_key:
                         child["parent_session_key"] = parent_key
+        for key in sorted(expected - set(by_key)):
+            children.append({"session_key": key, "transcript": None})
         (children_dir / "index.json").write_text(json.dumps(children, indent=2), encoding="utf-8")
 
     async def launch(self, prompt: str) -> AgentRunResult:
@@ -1191,6 +1211,11 @@ class OpenClawCliDeployer(BaseAgentDeployer):
 
         env_file = self._state_dir / ".env"
         session_id = str(uuid.uuid4())
+        (wd / "_openclaw_session.json").write_text(json.dumps({
+            "session_id": session_id,
+            "state_dir": str(self._state_dir),
+            "node_path": getattr(self, "_node_path", "node"),
+        }), encoding="utf-8")
         argv = self._launch_prefix() + [
             "agent",
             "--agent", _AGENT_ID,
@@ -1247,29 +1272,22 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                 status, error = "failed", envelope_error
             elif result_envelope is not None and exit_code in (0, None):
                 status, error = "completed", None
-                await self._wait_for_subagents(result_envelope, gateway)
             else:
                 status = "failed"
                 error = _diagnose_failure(stderr_log, exit_code)
                 if result_envelope is None:
                     error += " | no valid OpenClaw result envelope"
 
+            if result_envelope is not None and (
+                status == "completed" or result_envelope.get("acceptedSessionSpawns")
+            ):
+                await self._wait_for_subagents(result_envelope, gateway)
+
             session_id = (
                 (result_envelope or {}).get("meta", {}).get("agentMeta", {}).get("sessionId")
                 or session_id
             )
-            src = self._state_dir / "agents" / _AGENT_ID / "sessions" / f"{session_id}.jsonl"
-            dst = wd / "transcript.jsonl"
-            if src.exists():
-                shutil.copy2(str(src), str(dst))
-            else:
-                await self._export_session_transcript(session_id, dst)
-            if dst.exists():
-                try:
-                    stage_transcript_file_images(dst, wd, self._state_dir / "workspace")
-                except Exception as exc:
-                    logger.warning("openclaw_cli: failed to stage transcript images: %s", exc)
-            await self._export_child_transcripts(wd, result_envelope)
+            dst = await self._save_transcripts(wd, session_id, result_envelope)
             return AgentRunResult(
                 status=status, pid=proc.pid, exit_code=exit_code,
                 transcript_path=str(dst), stderr_path=str(stderr_log),
@@ -1290,6 +1308,195 @@ class OpenClawCliDeployer(BaseAgentDeployer):
                         raise asyncio.CancelledError
             finally:
                 self._stop_vision_usage_proxy()
+
+    async def _save_transcripts(self, wd: Path, session_id: str, envelope: dict | None) -> Path:
+        src = self._state_dir / "agents" / _AGENT_ID / "sessions" / f"{session_id}.jsonl"
+        dst = wd / "transcript.jsonl"
+        if src.exists():
+            shutil.copy2(str(src), str(dst))
+        else:
+            await self._export_session_transcript(session_id, dst)
+        if dst.exists():
+            try:
+                stage_transcript_file_images(dst, wd, self._state_dir / "workspace")
+            except Exception as exc:
+                logger.warning("openclaw_cli: failed to stage transcript images: %s", exc)
+        await self._export_child_transcripts(wd, envelope)
+        return dst
+
+    @classmethod
+    async def recover_stopped_artifacts(cls, sandbox, work_dir: str) -> dict[str, str]:
+        from ale_run.executors.sandbox import _ale_src_root_for
+
+        script = (
+            "import asyncio,sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);"
+            "from ale_run.agents.openclaw_cli.deployer import OpenClawCliDeployer;"
+            "wd=Path(sys.argv[2]);"
+            "asyncio.run(OpenClawCliDeployer._recover_session(wd));"
+            "print('OPENCLAW_TIMEOUT_ARTIFACTS='+json.dumps("
+            "OpenClawCliDeployer._recovered_artifact_manifest(wd)))"
+        )
+        script = "import json;" + script
+        argv = [sandbox.python, "-c", script, _ale_src_root_for(sandbox), work_dir]
+        command = shlex.join(argv) if sandbox.is_linux else subprocess.list2cmdline(argv)
+        result = await sandbox.run_command(command, timeout=180)
+        if result.returncode != 0:
+            raise RuntimeError(f"OpenClaw artifact recovery failed: {result.stderr[-1000:]}")
+        prefix = "OPENCLAW_TIMEOUT_ARTIFACTS="
+        records = [line[len(prefix):] for line in result.stdout.splitlines() if line.startswith(prefix)]
+        if len(records) != 1:
+            raise RuntimeError("OpenClaw artifact recovery returned no manifest")
+        try:
+            manifest = json.loads(records[0])
+        except ValueError as exc:
+            raise RuntimeError("OpenClaw artifact recovery returned an invalid manifest") from exc
+        if not isinstance(manifest, dict):
+            raise TypeError("OpenClaw artifact recovery returned an invalid manifest")
+        return manifest
+
+    @staticmethod
+    def _recovered_artifact_manifest(wd: Path) -> dict[str, str]:
+        files = [
+            wd / "transcript.jsonl", wd / "subagents" / "index.json", wd / "vision-usage.jsonl",
+            wd / "stdout.log", wd / "stderr.log", wd / "gateway.log",
+        ]
+        children = wd / "subagents"
+        if children.is_dir():
+            files.extend(sorted(children.glob("*.jsonl")))
+        manifest = {}
+        for path in files:
+            if path.is_file():
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                manifest[path.relative_to(wd).as_posix()] = digest.hexdigest()
+        return manifest
+
+    @classmethod
+    def validate_recovered_artifacts(cls, work_dir: Path, manifest: dict[str, str]) -> None:
+        actual = cls._recovered_artifact_manifest(work_dir)
+        if actual.keys() != manifest.keys():
+            raise RuntimeError("OpenClaw artifact gather failed: transcript files differ")
+        for path, digest in manifest.items():
+            if not isinstance(path, str) or not isinstance(digest, str) or actual.get(path) != digest:
+                raise RuntimeError(f"OpenClaw artifact gather failed for {path!r}")
+
+    @classmethod
+    async def _recover_session(cls, wd: Path) -> None:
+        metadata = wd / "_openclaw_session.json"
+        if not metadata.is_file():
+            return
+        session = json.loads(metadata.read_text(encoding="utf-8"))
+        session_id = str(uuid.UUID(session["session_id"]))
+        deployer = cls(SimpleNamespace(config=None, work_dir=str(wd)))
+        deployer._episode_state_dir = Path(session["state_dir"])
+        deployer._node_path = session["node_path"]
+        envelope = _result_from_logs(wd / "stdout.log", wd / "stderr.log")
+        if envelope:
+            candidate = envelope.get("meta", {}).get("agentMeta", {}).get("sessionId")
+            if candidate:
+                session_id = str(uuid.UUID(candidate))
+        transcript = wd / "transcript.jsonl"
+        children_dir = wd / "subagents"
+        backup_transcript = wd / f"_timeout_transcript_{uuid.uuid4().hex}.jsonl"
+        backup_children = wd / f"_timeout_subagents_{uuid.uuid4().hex}"
+        if transcript.exists():
+            transcript.replace(backup_transcript)
+        if children_dir.exists():
+            children_dir.replace(backup_children)
+        try:
+            await deployer._save_transcripts(wd, session_id, envelope)
+            gateway = wd / "gateway.log"
+            if not transcript.exists():
+                database = deployer._state_dir / "agents" / _AGENT_ID / "agent" / "openclaw-agent.sqlite"
+                has_events = False
+                if database.is_file():
+                    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
+                        has_events = bool(db.execute(
+                            "SELECT 1 FROM transcript_events WHERE session_id = ? LIMIT 1", (session_id,)
+                        ).fetchone())
+                        if db.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_transcript_archives'"
+                        ).fetchone():
+                            has_events |= bool(db.execute(
+                                "SELECT 1 FROM session_transcript_archives WHERE session_id = ? LIMIT 1", (session_id,)
+                            ).fetchone())
+                has_response = gateway.exists() and "[model-fetch] response" in gateway.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                if has_events or has_response or backup_transcript.exists() or (wd / "openclaw.pid").exists():
+                    raise RuntimeError("OpenClaw session transcript could not be recovered")
+                raise RuntimeError("OpenClaw agent process did not start")
+            index = children_dir / "index.json"
+            if transcript.exists():
+                if not index.is_file():
+                    raise RuntimeError("OpenClaw subagent transcripts could not be recovered")
+                children = json.loads(index.read_text(encoding="utf-8"))
+                if not isinstance(children, list):
+                    raise RuntimeError("OpenClaw subagent transcripts could not be recovered")
+                paths = [transcript]
+                for child in children:
+                    name = child.get("transcript") if isinstance(child, dict) else None
+                    if not isinstance(name, str) or Path(name).name != name:
+                        raise RuntimeError("OpenClaw subagent transcripts could not be recovered")
+                    paths.append(children_dir / name)
+                for path in paths:
+                    if not path.is_file() or path.stat().st_size == 0:
+                        raise RuntimeError("OpenClaw session transcript could not be recovered")
+                    event_count = 0
+                    with path.open(encoding="utf-8") as stream:
+                        for line in stream:
+                            if line.strip():
+                                event = json.loads(line)
+                                if not isinstance(event, dict):
+                                    raise RuntimeError("OpenClaw session transcript is invalid")
+                                event_count += 1
+                                message = event.get("message")
+                                if (isinstance(message, dict) and message.get("role") == "assistant"
+                                        and message.get("model") and not message.get("errorMessage")):
+                                    usage = message.get("usage")
+                                    if (not isinstance(usage, dict) or any(
+                                        not isinstance(usage.get(field), (int, float))
+                                        or isinstance(usage.get(field), bool)
+                                        or usage[field] < 0
+                                        for field in ("input", "output")
+                                    )):
+                                        raise RuntimeError("OpenClaw model usage could not be recovered")
+                    if not event_count:
+                        raise RuntimeError("OpenClaw session transcript is empty")
+            if transcript.is_file() and gateway.is_file():
+                with gateway.open(encoding="utf-8", errors="replace") as stream:
+                    has_success = any(
+                        "[model-fetch] response" in line and re.search(r"\bstatus=200\b", line)
+                        for line in stream
+                    )
+                usage = (envelope or {}).get("meta", {}).get("agentMeta", {}).get("usage", {})
+                has_usage = any(_usage_final_metrics(usage).values())
+                if has_success and not has_usage:
+                    with transcript.open(encoding="utf-8", errors="replace") as stream:
+                        for line in stream:
+                            try:
+                                event = json.loads(line)
+                            except ValueError:
+                                continue
+                            message = event.get("message", {}) if isinstance(event, dict) else {}
+                            if isinstance(message, dict) and any(_usage_final_metrics(message.get("usage")).values()):
+                                has_usage = True
+                                break
+                    if not has_usage:
+                        raise RuntimeError("OpenClaw model usage could not be recovered")
+        except BaseException:
+            if backup_transcript.exists():
+                backup_transcript.replace(transcript)
+            if backup_children.exists():
+                if children_dir.exists():
+                    shutil.rmtree(children_dir)
+                backup_children.replace(children_dir)
+            raise
+        backup_transcript.unlink(missing_ok=True)
+        if backup_children.exists():
+            shutil.rmtree(backup_children)
 
     async def _export_session_transcript(self, session_id: str, destination: Path) -> None:
         from ale_run.agents.qwen_code.runtime import command
@@ -1549,15 +1756,15 @@ db.close();
 
         image_usage = read_image_model_usage(work_dir / "vision-usage.jsonl")
         final_metrics = _usage_final_metrics(usage)
-        if children:
-            for target, field in (
-                ("total_input_tokens", "input_tokens"),
-                ("total_output_tokens", "output_tokens"),
-                ("total_cache_read_tokens", "cache_read_tokens"),
-                ("total_cache_creation_tokens", "cache_creation_tokens"),
-            ):
-                parent_total = sum(getattr(step.metrics, field) or 0 for step in builder.trajectory.steps if step.metrics)
-                child_total = sum(getattr(child.final_metrics, target) for child in children if child.final_metrics)
+        for target, field in (
+            ("total_input_tokens", "input_tokens"),
+            ("total_output_tokens", "output_tokens"),
+            ("total_cache_read_tokens", "cache_read_tokens"),
+            ("total_cache_creation_tokens", "cache_creation_tokens"),
+        ):
+            parent_total = sum(getattr(step.metrics, field) or 0 for step in builder.trajectory.steps if step.metrics)
+            child_total = sum(getattr(child.final_metrics, target) for child in children if child.final_metrics)
+            if target in final_metrics or parent_total or child_total:
                 final_metrics[target] = max(final_metrics.get(target, 0), parent_total) + child_total
         if image_usage:
             builder.trajectory.extra.setdefault("openclaw_cli", {})[

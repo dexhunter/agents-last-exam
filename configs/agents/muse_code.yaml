@@ -30,6 +30,7 @@ config:
 
   disable_web_tools: false
   disable_reminders: false
+  disable_request_user_input: false
   no_foreign_personal_context: true
   coordinate_space: pixel            # same CUA bridge and default as Codex/Claude
   telemetry_enabled: true            # native events, API usage, timings, tool results

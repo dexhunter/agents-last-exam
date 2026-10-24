@@ -20,7 +20,8 @@ Phase mapping (refined from simprun, surface renamed to LOG_SPEC events):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
+import json
 import logging
 import signal
 import time
@@ -212,6 +213,7 @@ async def run_one_unit(
     trajectory: Trajectory | None = None
     run_result: AgentRunResult | None = None
     executor: BaseExecutor | None = None
+    host_artifacts_dir: Path | None = None
 
     status = "completed"
     score: float | None = None
@@ -308,6 +310,7 @@ async def run_one_unit(
             agent_name = getattr(config, "name", "agent")
             host_artifacts_dir = writer.run_dir / "origin_log" / agent_name
             host_artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (host_artifacts_dir / "_cli_identity.json").unlink(missing_ok=True)
             executor = _build_executor(
                 executor_type=executor_type,
                 env=env,
@@ -420,11 +423,32 @@ async def run_one_unit(
                             writer.emit_event(
                                 "incremental_pull_final_failed", error=reconcile_err,
                             )
+            launch_confirmed = True
+            launch_confirmation_error = None
+            if run_result.status in ("failed", "timeout"):
+                try:
+                    launch_confirmed = await _agent_launch_started(executor)
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    launch_confirmed = False
+                    launch_confirmation_error = f"{type(exc).__name__}: {exc}"
             writer.emit_event(
                 "agent_finished",
-                status=run_result.status,
+                status=run_result.status if launch_confirmed else "failed",
                 error=run_result.error,
+                launch_confirmed=launch_confirmed,
             )
+
+            recover_artifacts = getattr(deployer_cls, "recover_stopped_artifacts", None)
+            recovery_manifest = None
+            recovery_error = None
+            if (launch_confirmed and isinstance(executor, SandboxExecutor)
+                    and recover_artifacts is not None):
+                try:
+                    recovery_manifest = await recover_artifacts(env.sandbox, executor.work_dir)
+                    writer.emit_event("agent_artifact_recovery_done", status=run_result.status)
+                except Exception as exc:
+                    recovery_error = exc
+                    writer.emit_event("agent_artifact_recovery_failed", error=str(exc))
 
             # ============================================================
             # Phase 2b — post-launch gather (origin_log) via executor.gather_dir
@@ -457,6 +481,17 @@ async def run_one_unit(
                     "origin_log_gather_failed",
                     report={"transport": "?", "files": 0, "error": str(e)},
                 )
+            if not launch_confirmed:
+                env.set_phase("agent_start")
+                detail = launch_confirmation_error or "launch marker absent"
+                raise RuntimeError(
+                    f"agent launch not confirmed; evaluation skipped ({detail}); "
+                    f"original result: {run_result.error or run_result.status}"
+                )
+            if recovery_error is not None:
+                raise RuntimeError("agent artifact recovery failed") from recovery_error
+            if recovery_manifest is not None:
+                deployer_cls.validate_recovered_artifacts(host_artifacts_dir, recovery_manifest)
             # ============================================================
             # Phase 3 — gather env output, stage reference, evaluate
             # ============================================================
@@ -533,6 +568,11 @@ async def run_one_unit(
                         builder=builder,
                     )
                 except Exception as e:
+                    if recovery_manifest is not None:
+                        score = None
+                        eval_status = "failed"
+                        eval_error = err_dict(e)
+                        raise RuntimeError("recovered artifact parsing failed") from e
                     logger.warning("parse_artifacts failed for %s: %s", unit.slug, e)
                     builder.add_step(
                         source="system",
@@ -578,7 +618,11 @@ async def run_one_unit(
             else:
                 status = "completed"
 
-            phase = env.current_phase if status != "completed" else None
+            phase = (
+                "agent_run" if status == "timeout" and run_result is not None
+                and run_result.status == "timeout"
+                else env.current_phase if status != "completed" else None
+            )
 
         finally:
             if sem is not None:
@@ -640,6 +684,19 @@ async def run_one_unit(
         error=eval_error,
     )
 
+    cli_identity: dict[str, Any] = {}
+    if host_artifacts_dir is not None:
+        try:
+            loaded = json.loads((host_artifacts_dir / "_cli_identity.json").read_text())
+            if isinstance(loaded, dict):
+                version = loaded.get("cli_version")
+                source = loaded.get("source")
+                cli_identity = {
+                    "cli_version": version if isinstance(version, str) else None,
+                    "source": source if isinstance(source, str) and source in {"official", "fork", "custom"} else None,
+                }
+        except (OSError, ValueError):
+            pass
     run_meta = _build_run_meta(
         run_id=writer.run_id,
         unit=unit,
@@ -655,6 +712,7 @@ async def run_one_unit(
         category=_category_from_error(error_str),
         task_revision_value=task_revision_value,
         environment=environment_metadata,
+        cli_identity=cli_identity,
     )
     writer.write_run_json(run_meta)
 
@@ -681,6 +739,28 @@ async def run_one_unit(
 # ======================================================================
 # Helpers
 # ======================================================================
+
+
+async def _agent_launch_started(executor: BaseExecutor) -> bool:
+    """Confirm that this executor's deployer passed installation and started launch."""
+    if isinstance(executor, SandboxExecutor):
+        sep = "/" if executor.sandbox.is_linux else "\\"
+        path = f"{executor.work_dir.rstrip(sep)}{sep}_agent_started"
+        expected = executor._run_token
+        try:
+            marker = await asyncio.wait_for(executor.sandbox.read_text(path), timeout=30)
+        except FileNotFoundError:
+            return False
+    else:
+        work_dir = Path(executor.work_dir)
+        try:
+            marker = (work_dir / "_agent_started").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        expected = json.loads((work_dir / "_spec.json").read_text())["run_token"]
+    if not expected or marker != expected:
+        raise RuntimeError("invalid agent launch marker")
+    return True
 
 
 def _extract_score(eval_output: Any) -> float | None:
@@ -1119,6 +1199,7 @@ def _build_run_meta(
     category: str | None,
     task_revision_value: str | None = None,
     environment: dict[str, Any] | None = None,
+    cli_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Construct the LOG_SPEC §4 run.json payload."""
     usage = (
@@ -1126,7 +1207,7 @@ def _build_run_meta(
         if trajectory is not None and trajectory.final_metrics is not None
         else None
     )
-    cfg_repr = redact_config(dict(unit.agent_spec.config))
+    cfg_repr = redact_config(asdict(config) if is_dataclass(config) else dict(unit.agent_spec.config))
     return {
         "schema_version": 2,
         "run_id": run_id,
@@ -1136,6 +1217,7 @@ def _build_run_meta(
             "class": unit.agent_spec.class_,
             "name": getattr(config, "name", unit.agent_spec.class_),
             "version": getattr(config, "cli_version", None),
+            "cli_identity": cli_identity or {"cli_version": None, "source": None},
             "model": config.model,
             "executor": executor_type,
             "config_repr": cfg_repr,

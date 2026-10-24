@@ -1,12 +1,11 @@
-"""DroidDeployer — drives the Factory.ai ``droid`` CLI (v0.116.0).
+"""DroidDeployer — drives the Factory.ai ``droid`` CLI.
 
 Pre-built binary; NOT installable via npm.  The deployer expects the
 binary to exist on PATH (baked into the sandbox image).  If missing,
 attempts a download from the official install script.
 
-Auth bypass: ``FACTORY_API_KEY=byok-noop`` satisfies the CLI's auth
-gate.  Actual LLM calls route via OpenRouter (configured in
-``settings.json``).
+Factory authentication is separate from the model provider credentials
+configured in ``settings.json``.
 
 MCP config at ``~/.factory/mcp.json``.  Headless via
 ``--skip-permissions-unsafe``.  Output: stream-json NDJSON.
@@ -17,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_S = 2.0
 _TERM_GRACE_S = 2.0
-_BYOK_FACTORY_KEY = "byok-noop"
 
 
 class DroidDeployer(BaseAgentDeployer):
@@ -50,25 +49,19 @@ class DroidDeployer(BaseAgentDeployer):
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
     hot_artifacts: ClassVar[tuple[str, ...]] = ("transcript.jsonl", "stderr.log")
 
-    _PINNED_VERSION: ClassVar[str] = "0.116.0"
-
     @property
     def version(self) -> str | None:
-        return self._PINNED_VERSION
+        return self.config.cli_version
 
     # =========================================================================
     # install
     # =========================================================================
 
     async def _auto_install_cli(self) -> None:
-        """Install the droid binary, pinned to ``_PINNED_VERSION``.
-
-        Primary path is the direct pinned-version download (so the
-        installed binary matches the version of record for reproducible
-        experiments). The official installer — which always pulls the
-        *latest* release — is only a fallback if the pinned download
-        fails.
-        """
+        """Install the exact configured official release."""
+        version = self.config.cli_version
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ValueError(f"droid: invalid CLI version {version!r}")
         home = os.path.expanduser("~")
         bin_dir = f"{home}/.local/bin"
         os.makedirs(bin_dir, exist_ok=True)
@@ -78,45 +71,38 @@ class DroidDeployer(BaseAgentDeployer):
             [
                 "bash", "-c",
                 f'curl -fsSL "https://downloads.factory.ai/factory-cli/releases/'
-                f'{self._PINNED_VERSION}/linux/x64/droid" '
+                f'{version}/linux/x64/droid" '
                 f'-o "{bin_dir}/droid" && chmod +x "{bin_dir}/droid"',
             ],
             capture_output=True, text=True, timeout=180,
         )
         if direct.returncode == 0:
-            logger.info("droid: installed via pinned download (v%s)",
-                        self._PINNED_VERSION)
+            logger.info("droid: installed via pinned download (v%s)", version)
         else:
-            logger.warning(
-                "droid: pinned download failed (rc=%d), falling back to "
-                "official installer (NOTE: pulls latest, not pinned) …",
-                direct.returncode,
+            raise RuntimeError(
+                f"droid: pinned download failed (rc={direct.returncode}): "
+                f"{(direct.stderr or '')[:300]}"
             )
-            proc = await asyncio.to_thread(
-                subprocess.run,
-                ["bash", "-c", "curl -fsSL https://app.factory.ai/cli | sh"],
-                capture_output=True, text=True, timeout=180,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"droid install failed — both pinned download "
-                    f"(rc={direct.returncode}: {(direct.stderr or '')[:300]}) and "
-                    f"official installer (rc={proc.returncode}: "
-                    f"{(proc.stderr or '')[:300]}) failed"
-                )
-            logger.info("droid: installed via official script — %s",
-                        (proc.stdout or "").strip()[-200:])
 
-        if bin_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
+        os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
+
+    @staticmethod
+    def _installed_version(path: str) -> str | None:
+        try:
+            probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.search(r"\b\d+\.\d+\.\d+\b", probe.stdout or "")
+        return match.group() if probe.returncode == 0 and match else None
 
     async def install(self) -> None:
         cfg: DroidConfig = self.config  # type: ignore[assignment]
         sandbox = self.executor.sandbox
 
         droid_path = shutil.which("droid")
-        if not droid_path:
-            logger.info("droid: 'droid' not on PATH, installing …")
+        installed = await asyncio.to_thread(self._installed_version, droid_path) if droid_path else None
+        if installed != cfg.cli_version:
+            logger.info("droid: installed version %s; installing %s", installed, cfg.cli_version)
             await self._auto_install_cli()
             droid_path = shutil.which("droid")
             if not droid_path:
@@ -124,16 +110,12 @@ class DroidDeployer(BaseAgentDeployer):
                     "DroidDeployer: 'droid' still not found after install"
                 )
         self._droid_path = droid_path
-
-        try:
-            probe = await asyncio.to_thread(
-                subprocess.run,
-                [droid_path, "--version"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"droid --version timed out: {e}")
-        logger.info("droid: CLI ok — %s", (probe.stdout or "").strip())
+        installed = await asyncio.to_thread(self._installed_version, droid_path)
+        if installed != cfg.cli_version:
+            raise RuntimeError(f"droid: installed version {installed!r} != {cfg.cli_version!r}")
+        self.actual_cli_version = installed
+        self.cli_source = "official"
+        logger.info("droid: CLI ok — %s", installed)
 
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)
@@ -193,6 +175,36 @@ class DroidDeployer(BaseAgentDeployer):
             json.dumps(settings, indent=2), encoding="utf-8",
         )
         logger.info("droid: config staged at %s", factory_home)
+        self._disabled_tools = await self._resolve_disabled_tools(cfg, wd)
+
+    async def _resolve_disabled_tools(self, cfg: DroidConfig, work_dir: Path) -> tuple[str, ...]:
+        if "squad-board" not in cfg.disabled_tools:
+            return tuple(cfg.disabled_tools)
+        probe = await asyncio.to_thread(
+            subprocess.run,
+            [
+                self._droid_path,
+                "exec",
+                "--list-tools",
+                "--output-format",
+                "json",
+                "--model",
+                cfg.model,
+                "--cwd",
+                str(work_dir),
+                "--disabled-tools",
+                "squad-board",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            env=self._build_env(cfg),
+            cwd=str(work_dir),
+        )
+        if probe.returncode != 0 and "Unknown tool identifier(s)" in (probe.stderr or ""):
+            logger.info("droid: squad-board is unavailable in the installed CLI")
+            return tuple(tool for tool in cfg.disabled_tools if tool != "squad-board")
+        return tuple(cfg.disabled_tools)
 
     # =========================================================================
     # launch
@@ -300,8 +312,9 @@ class DroidDeployer(BaseAgentDeployer):
             argv.append("--skip-permissions-unsafe")
         if cfg.reasoning_effort and cfg.reasoning_effort != "off":
             argv.extend(["--reasoning-effort", cfg.reasoning_effort])
-        if cfg.disabled_tools:
-            argv.extend(["--disabled-tools", ",".join(cfg.disabled_tools)])
+        disabled_tools = getattr(self, "_disabled_tools", cfg.disabled_tools)
+        if disabled_tools:
+            argv.extend(["--disabled-tools", ",".join(disabled_tools)])
         # Deny-only tool policy: no --enabled-tools allow list.
         return argv
 
@@ -309,7 +322,6 @@ class DroidDeployer(BaseAgentDeployer):
         env = os.environ.copy()
         for k, v in (self.executor.env or {}).items():
             env[k] = v
-        env["FACTORY_API_KEY"] = _BYOK_FACTORY_KEY
         env["NO_COLOR"] = "1"
         return env
 

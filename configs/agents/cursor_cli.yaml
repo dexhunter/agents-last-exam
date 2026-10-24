@@ -24,7 +24,7 @@ config:
 
   # Pinned cursor-agent version (Cursor's date-hash scheme); installs this exact
   # build so all environments converge on one version.
-  cursor_version: "2026.05.28-a70ca7c"
+  cli_version: "2026.10.16-e3cb207"
 
   # Permission deny patterns for cli-config.json. Supports Shell(...), Read(...),
   # Write(...), WebFetch(...), Mcp(server, tool). Default: none denied.

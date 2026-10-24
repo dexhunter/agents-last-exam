@@ -68,7 +68,8 @@ class LocalExecutor(BaseExecutor):
             "sandbox_local": False,
             "install_agent_deps": False,
         }
-        for name in ("_result.json", "_worker_result.json", "_done.marker"):
+        for name in ("_result.json", "_worker_result.json", "_done.marker", "_cli_identity.json",
+                     "_agent_started"):
             (work_dir / name).unlink(missing_ok=True)
         spec_path = work_dir / "_spec.json"
         spec_path.write_text(json.dumps(spec))

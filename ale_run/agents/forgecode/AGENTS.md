@@ -9,7 +9,7 @@ pinning, tool classification, and test records.
 
 | Method | Status | Notes |
 |---|---|---|
-| `install()` | Implemented | Downloads forge binary from GitHub releases (`https://github.com/anysphere/forgecode/releases/`). Falls back to `cargo install` from source. Verifies with `forge --version`. Writes `permissions.yaml` (fully permissive) and `forge.toml` (model config, auto_dump). |
+| `install()` | Implemented | Checks `forge --version`, installs the configured GitHub release if needed, and checks again. Writes `permissions.yaml` and `forge.toml`. |
 | `launch()` | Implemented | Runs `forge -p "<prompt>" --conversation-id <UUID> -C <dump_dir>`. Follows the droid deployer pattern for subprocess spawning, polling, timeout handling. Post-run materialises dump.json via `forge conversation dump <id>`. |
 | `parse_artifacts()` | Implemented | Parses forge's `ConversationDump` JSON (`dump.json`). Falls back to transcript.jsonl if dump.json is missing. Maps text/tool/image entries to trajectory steps. |
 
@@ -19,18 +19,16 @@ pinning, tool classification, and test records.
 |---|---|
 | Upstream | `github.com/tailcallhq/forgecode` |
 | Releases | `github.com/anysphere/forgecode/releases/` |
-| Install | `install()` downloads pre-built binary; falls back to `cargo install` from source |
+| Install | `install()` downloads the configured pre-built release |
 
 ## 2. Install
 
 The deployer's `install()` method handles installation automatically:
 
-1. Checks if `forge` is on PATH.
-2. If not, downloads from GitHub releases:
-   `https://github.com/anysphere/forgecode/releases/latest/download/forge-linux-x64`
-3. Falls back to `cargo install --git https://github.com/anysphere/forgecode --bin forge forge_main`
-4. Verifies with `forge --version`.
-5. Writes config files:
+1. Checks the installed version.
+2. If missing or different, downloads the configured release from GitHub.
+3. Verifies with `forge --version`.
+4. Writes config files:
    - `~/.forge/permissions.yaml` -- fully permissive (read/write/command/url)
    - `~/.forge/.forge.toml` -- `[session]` provider/model, `auto_dump = "json"`
    - Wipes `~/.forge/.credentials.json` to force env-var re-migration

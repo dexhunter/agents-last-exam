@@ -89,7 +89,7 @@ def _find_gemini_shim(local_prefix: str) -> str | None:
     return p
 
 _YOLO_POLICY = """\
-# AgentHLE headless yolo policy — allow all tools, deny ask_user.
+# AgentHLE headless yolo policy.
 [[rule]]
 toolName = "*"
 decision = "allow"
@@ -97,11 +97,6 @@ priority = 998
 modes = ["yolo"]
 allowRedirection = true
 
-[[rule]]
-toolName = "ask_user"
-decision = "deny"
-priority = 999
-modes = ["yolo"]
 """
 
 

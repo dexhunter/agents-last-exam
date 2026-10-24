@@ -219,7 +219,8 @@ class SandboxExecutor(BaseExecutor):
         # 3. Reset stale state from any prior attempt (best-effort)
         await sb.rm([
             pid_file, result_path, done_marker, entry_log, secrets_path,
-            f"{wd}{sep}_worker_result.json",
+            f"{wd}{sep}_worker_result.json", f"{wd}{sep}_cli_identity.json",
+            f"{wd}{sep}_agent_started",
         ])
 
         # 4. Write spec.json into the sandbox's work_dir.

@@ -101,7 +101,7 @@ def _installed_version(claude_path: str) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     m = _VERSION_RE.search((probe.stdout or "") + (probe.stderr or ""))
-    return m.group(1) if m else None
+    return m.group(1) if probe.returncode == 0 and m else None
 
 
 class ClaudeCodeDeployer(BaseAgentDeployer):
@@ -218,6 +218,10 @@ class ClaudeCodeDeployer(BaseAgentDeployer):
                 claude_path, installed or "unknown",
             )
         self._claude_path = claude_path
+        self.actual_cli_version = installed
+        self.cli_source = (
+            "official" if (cfg.cli_version or "").startswith("@anthropic-ai/claude-code") else "custom"
+        )
         logger.info("claude_code: claude CLI ok — version %s", installed or "unknown")
 
         # 3. Make work_dir.
@@ -412,6 +416,11 @@ class ClaudeCodeDeployer(BaseAgentDeployer):
         # the local executor case where install() may not have triggered it.
         for k, v in (self.executor.env or {}).items():
             env[k] = v
+
+        if cfg.context_window is not None:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(cfg.context_window)
+        if cfg.auto_compact_token_limit is not None:
+            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(cfg.auto_compact_token_limit)
 
         # Extended-thinking budget — pin it explicitly via Claude Code's
         # documented MAX_THINKING_TOKENS env var. The CLI already defaults to

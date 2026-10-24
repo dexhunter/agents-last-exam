@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import zipfile
 from collections import Counter
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -51,26 +53,45 @@ class NativeEventMirror:
 
     def snapshot(self, destination: Path) -> None:
         """Retain this launch's session evidence without copying application profiles."""
-        for source in self.offsets:
-            target = destination / source.parent.relative_to(self.data_dir)
-            shutil.copytree(source.parent, target, dirs_exist_ok=True)
-            log = target / source.name
-            log.write_text(
-                redact(log.read_text(encoding="utf-8", errors="replace"), self.secrets),
-                encoding="utf-8",
-            )
+        destination.mkdir(parents=True, exist_ok=True)
+        archive_path = destination / "native.zip"
+        temporary = archive_path.with_suffix(".zip.tmp")
+        copied: set[Path] = set()
+        try:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for source in self.offsets:
+                    for path in sorted(source.parent.rglob("*")):
+                        if path in copied or not path.is_file():
+                            continue
+                        copied.add(path)
+                        relative = path.relative_to(self.data_dir).as_posix()
+                        with archive.open(relative, "w", force_zip64=True) as output:
+                            if path.name == "session.jsonl":
+                                with path.open(encoding="utf-8", errors="replace") as records:
+                                    for line in records:
+                                        output.write(redact(line, self.secrets).encode("utf-8"))
+                            else:
+                                with path.open("rb") as content:
+                                    shutil.copyfileobj(content, output)
+            temporary.replace(archive_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
-def read_records(path: Path) -> Iterator[dict[str, Any]]:
+def read_records(path: Path, *, member: str | None = None) -> Iterator[dict[str, Any]]:
     """Read JSONL, tolerating BOMs, malformed records, and truncated final lines."""
-    try:
-        handle = path.open(encoding="utf-8-sig", errors="replace")
-    except OSError:
-        return
-    with handle:
+    with ExitStack() as stack:
+        try:
+            if member is None:
+                handle = stack.enter_context(path.open("rb"))
+            else:
+                archive = stack.enter_context(zipfile.ZipFile(path))
+                handle = stack.enter_context(archive.open(member))
+        except OSError:
+            return
         for line in handle:
             try:
-                record = json.loads(line)
+                record = json.loads(line.decode("utf-8-sig", errors="replace"))
             except ValueError:
                 continue
             if isinstance(record, dict):
@@ -102,10 +123,18 @@ def native_events(work_dir: Path) -> Iterator[dict[str, Any]]:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("invalid Muse native data path")
         data_dir = work_dir / relative
-    sources = [mirror, *sorted(data_dir.rglob("session.jsonl"))]
+    sources = [(mirror, None), *((path, None) for path in sorted(data_dir.rglob("session.jsonl")))]
+    archive_path = data_dir / "native.zip"
+    if archive_path.is_file():
+        with zipfile.ZipFile(archive_path) as archive:
+            sources.extend(
+                (archive_path, name)
+                for name in archive.namelist()
+                if name.endswith("/session.jsonl")
+            )
     seen: set[tuple[str, str]] = set()
-    for path in sources:
-        for record in read_records(path):
+    for path, member in sources:
+        for record in read_records(path, member=member):
             payload = record.get("payload")
             if not isinstance(payload, dict):
                 continue

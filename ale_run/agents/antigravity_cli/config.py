@@ -25,14 +25,14 @@ class AntigravityCliConfig:
 
     # Model display name as printed by ``agy models`` (accepted verbatim).
     # Empty => let agy use its configured default.
-    model: str = "Gemini 3.7 Flash (High)"
+    model: str = "Gemini 3.8 Flash (High)"
 
     # Bypass all tool-permission prompts (required headless). Maps to
     # ``--dangerously-skip-permissions``.
     dangerously_skip_permissions: bool = True
 
     # Pinned CLI version. The deployer enforces this exact version.
-    cli_version: str = "1.1.25"
+    cli_version: str = "1.4.1"
 
     # Override the install source. Empty => resolve the exact version from the
     # official updater manifest. A direct binary/tarball URL may be supplied for

@@ -30,13 +30,8 @@ config:
   # code paths, and tool parameters are not enabled in the external OTEL stream.
   otel_enabled: true
 
-  # ALE invariants are not configurable: the harness always auto-approves,
-  # disables CLI updates, uses `--sandbox off` and `--no-plan`, and removes
-  # ask_user_question / enter_plan_mode / exit_plan_mode.
-  # Web search/fetch remain available by default. Add tool names only when an
-  # experiment needs further restrictions.
-  # disabled_tools:
-  #   - image_gen
+  # No tools are excluded by default.
+  disabled_tools: []
 
   # Optional custom-endpoint metadata. Omitted values are not written to TOML.
   # context_window: 262144

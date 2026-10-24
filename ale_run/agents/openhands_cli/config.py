@@ -1,6 +1,6 @@
 """OpenHandsCliConfig: per-episode knobs for the OpenHands CLI deployer.
 
-OpenHands CLI is the official ``openhands-cli`` pip package.  It uses
+OpenHands CLI is the official ``openhands`` pip package. It uses
 LiteLLM internally, so model strings follow LiteLLM conventions:
 
   - OpenRouter:  ``openrouter/anthropic/claude-sonnet-4.6``

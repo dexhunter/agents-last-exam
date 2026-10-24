@@ -58,6 +58,18 @@ _TERM_GRACE_S = 2.0
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
 _UPDATER_BASE_URL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 _PINNED_RELEASES: dict[tuple[str, str], tuple[str, str]] = {
+    ("1.4.1", "linux_amd64"): (
+        "https://storage.googleapis.com/antigravity-public/antigravity-cli/"
+        "1.4.1-6385551759245312/linux-x64/cli_linux_x64.tar.gz",
+        "e291adba20debd0f309297a58fa6355b278c6abc21cfcb2e3245783c4f3708bac"
+        "14a7639600973e2d03cca5a63b842f6263e99ffe563f7460663004fee07b38c",
+    ),
+    ("1.4.1", "windows_amd64"): (
+        "https://storage.googleapis.com/antigravity-public/antigravity-cli/"
+        "1.4.1-6385551759245312/windows-x64/cli_windows_x64.exe",
+        "cebd3d0940c848db88251748f29f4f33a1f06c2ffafbaeeb2b937c4552b9dbab"
+        "1117cb74df420ebe35c5e239cb9f160fbe5d2c447cd685c155659028d8e47576",
+    ),
     ("1.1.25", "linux_amd64"): (
         (
             "https://storage.googleapis.com/antigravity-public/antigravity-cli/"
@@ -105,7 +117,7 @@ def _installed_version(agy_path: str) -> str | None:
     except (subprocess.SubprocessError, OSError):
         return None
     m = _VERSION_RE.search((probe.stdout or "") + (probe.stderr or ""))
-    return m.group(1) if m else None
+    return m.group(1) if probe.returncode == 0 and m else None
 
 
 def _win_appdata_bin(home: str) -> str:
@@ -273,7 +285,7 @@ class AntigravityCliDeployer(BaseAgentDeployer):
         # existing binary, so use the signed updater manifest directly.
         agy = _find_agy(home, is_windows=self._is_windows)
         installed = await asyncio.to_thread(_installed_version, agy) if agy else None
-        stale = bool(agy and cfg.cli_version and installed and installed != cfg.cli_version)
+        stale = bool(agy and cfg.cli_version and installed != cfg.cli_version)
         if not agy or stale:
             if stale:
                 logger.info(
@@ -289,6 +301,8 @@ class AntigravityCliDeployer(BaseAgentDeployer):
                 f"antigravity_cli: installed version {installed!r} does not match "
                 f"configured {cfg.cli_version!r}"
             )
+        self.actual_cli_version = installed
+        self.cli_source = "custom" if cfg.download_url else "official"
         self._agy_path = agy
         # Put the install dir on PATH so launch() and any self-update find it.
         bin_dir = (

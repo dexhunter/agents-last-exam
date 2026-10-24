@@ -25,4 +25,4 @@ config:
   disable_auto_update: true
 
   # Official npm package, dynamically installed when absent or stale.
-  cli_version: "@moonshot-ai/kimi-code@0.27.0"
+  cli_version: "@moonshot-ai/kimi-code@2.2.0"

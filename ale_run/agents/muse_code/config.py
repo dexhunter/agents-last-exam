@@ -31,6 +31,7 @@ class MuseCodeConfig:
     execution_capacity: int | None = None
     disable_web_tools: bool = False
     disable_reminders: bool = False
+    disable_request_user_input: bool = False
     no_foreign_personal_context: bool = True
     coordinate_space: str = "pixel"
     telemetry_enabled: bool = True

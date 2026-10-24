@@ -118,6 +118,11 @@ class DockerExecutor(BaseExecutor):
     ) -> "AgentRunResult":
         from ..base_interface import AgentRunResult
 
+        host_work = Path(self.work_dir)
+        host_work.mkdir(parents=True, exist_ok=True)
+        (host_work / "_cli_identity.json").unlink(missing_ok=True)
+        (host_work / "_agent_started").unlink(missing_ok=True)
+
         if not _docker_available():
             return AgentRunResult(
                 status="failed",
@@ -129,9 +134,6 @@ class DockerExecutor(BaseExecutor):
                 error=f"DockerExecutor: image {self.image!r} not present "
                       f"on host. Pull or build it first.",
             )
-
-        host_work = Path(self.work_dir)
-        host_work.mkdir(parents=True, exist_ok=True)
 
         # 1. Write spec.json into the bind mount.
         #    Secrets (api keys etc.) are deliberately KEPT OUT of the spec —

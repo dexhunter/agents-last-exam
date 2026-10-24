@@ -7,14 +7,17 @@ OpenAI Codex CLI agent deployer (agents-last-exam framework).
 
 ## 1. Source & Fork Strategy
 
-The deployer runs a pinned **fork** build of the codex CLI, not stock NPM.
+The default is the official npm package `@openai/codex@0.163.0`. The fork
+described below remains available only for reproducing explicitly configured
+legacy experiments. The historical tool results below apply to the fork, not
+to the official package.
 
 | Aspect | Value |
 |---|---|
 | Fork source | `cua-verse/codex` branch `agenthle` = openai/codex `main` merged in + our carries |
 | Pinned version | `codex-cli 0.0.0-agenthle-20260614` (`CodexConfig.fork_version`; set in codex-rs workspace `Cargo.toml`) |
 | Distribution | Prebuilt native binary per OS, published as a GitHub Release, overlaid over the npm vendor binary |
-| NPM fallback | `@openai/codex@0.114.0` — installed only when no codex is on PATH, then the fork binary is overlaid on top |
+| NPM fallback | The configured `cli_version` is installed when no codex is on PATH, then the fork binary is overlaid on top |
 
 Carries on top of upstream `main`:
 - **Windows `apply_patch` fix** (`codex-rs/arg0/src/lib.rs`): replace the
@@ -27,9 +30,11 @@ Carries on top of upstream `main`:
 
 ### Version-pinned ensure-latest (install)
 
-`install()` makes the running codex *exactly* `fork_version`, comparing
-`codex --version`:
-- **not on PATH** → `npm install -g @openai/codex@<codex_version>`, then overlay the fork binary;
+When `fork_version` is set, `install()` checks that exact fork version. With
+the default empty `fork_version`, it installs the configured `cli_version` from
+npm when absent or mismatched, and verifies the version before launch.
+For legacy fork runs:
+- **not on PATH** → `npm install -g @openai/codex@<cli_version>`, then overlay the fork binary;
 - **present, wrong version** (stale fork or stock) → overlay the fork binary (download);
 - **present, matches** → skip the download.
 
@@ -46,16 +51,15 @@ pinned).
 ### Commands
 
 ```bash
-# Linux — npm fallback only (when no codex is on PATH); the fork binary is then overlaid
-npm install -g @openai/codex@0.114.0
+npm install -g @openai/codex@0.163.0
 ```
 
 ### Binary Paths
 
 | OS | Shim | Overlaid vendor binary | Version command |
 |---|---|---|---|
-| Linux | `/usr/local/bin/codex` (npm shim) | `…/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex` (top-level **or** nested npm path) | `codex --version` -> `codex-cli 0.0.0-agenthle-20260614` |
-| Windows | `codex.cmd` (npm shim) | `…\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe` | same fork version |
+| Linux | `/usr/local/bin/codex` (npm shim) | `…/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex` (top-level **or** nested npm path) | `codex --version` reports the configured version |
+| Windows | `codex.cmd` (npm shim) | `…\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe` | same version check |
 
 ### Required Environment
 
@@ -190,8 +194,8 @@ Notes:
 | `sandbox_mode` | str | `"danger-full-access"` | Codex sandbox policy (used only when `yolo=false`) |
 | `yolo` | bool | `true` | Bypass all approval prompts (headless exec) |
 | `reasoning_effort` | str | `"high"` | `model_reasoning_effort` → Responses-API `reasoning.effort` |
-| `codex_version` | str | `"0.114.0"` | NPM stock version — fallback install only when no codex is on PATH |
-| `fork_version` | str | `"0.0.0-agenthle-20260614"` | Pinned fork build the running `codex --version` must report; drives ensure-latest (§1) |
+| `cli_version` | str | `"0.163.0"` | Pinned official npm version |
+| `fork_version` | str | `""` | Optional legacy fork build |
 | `patched_binary_url` | str | fork release `…/codex` | GitHub Release URL for the fork Linux binary; overlaid when the running build ≠ `fork_version`. `""` = skip overlay |
 | `patched_binary_url_windows` | str | fork release `…/codex-…-windows-msvc.exe` | Fork Windows binary; used instead of `patched_binary_url` on Windows. `""` = skip |
 | `model_catalog_path` | str | `""` | Host path to a Codex model-catalog JSON (for models not in codex's bundled catalog); read + sanitised host-side, shipped into the sandbox |
@@ -208,8 +212,8 @@ Notes:
 
 - **No prompt caching for Anthropic via codex+OpenRouter**: OpenRouter's
   `/v1/responses` translation layer drops `cache_control` for Anthropic models.
-- **`apply_patch` on Windows**: Upstream `.bat` shim corruption -- resolved via
-  patched binary when `patched_binary_url` is set.
+- **`apply_patch` on Windows**: The historical fork addressed `.bat` shim
+  corruption; this record does not establish the behavior of the official CLI.
 - **Codex requires git repo**: The working directory must be a git repository.
   The deployer initializes one via `git init` if missing.
 - **NDJSON BOM**: Output may include UTF-8 BOM prefix. The parser strips BOMs.

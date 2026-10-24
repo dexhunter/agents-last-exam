@@ -10,7 +10,8 @@ grok --prompt "..." --format json --max-tool-rounds 400
 
 Unlike Claude Code (`--bare`), Grok CLI keeps its built-in tools (bash, file
 read/write, grep, delegation, scheduling, etc.) enabled alongside the CUA MCP
-tools. This gives the agent 54 tools total (33 enabled, 21 disabled).
+tools. No tools are excluded by default; some require external services or an
+interactive client.
 
 ## Architecture
 
@@ -97,13 +98,13 @@ The deployer writes `~/.grok/user-settings.json` with MCP server config during
       }
     ]
   },
-  "disabledTools": ["search_web", "paid_request", "..."]
+  "disabledTools": []
 }
 ```
 
 The `disabledTools` array is read by the fork and removes those tools before
 the agent starts. The deployer populates it from the `disabled_tools` field in
-`GrokCliConfig` (defaults to `_DISABLED_TOOLS_OPENROUTER` -- 21 tools).
+`GrokCliConfig` (empty by default).
 
 ## Config
 
@@ -122,7 +123,7 @@ agent:
 | `model` | Model id passed to the CLI via `--model` |
 | `max_tool_rounds` | Passed to `--max-tool-rounds` flag (-1 = unlimited, mapped to 100000) |
 | `timeout_s` | Wall-clock budget for the episode |
-| `disabled_tools` | Tool names to remove before the agent runs. Written to `user-settings.json` as `disabledTools`. Defaults to 22 tools unavailable via OpenRouter. |
+| `disabled_tools` | Tool names to remove before the agent runs. Written to `user-settings.json` as `disabledTools`. Empty by default. |
 | `bundle_url` | Linux: URL to download the fork bundle JS, launched via Bun. Defaults to the `v0.1.1-agenthle` `grok-bundle.js` (required for OpenRouter). Empty = stock binary, which ZodErrors on OpenRouter streams — debug only. |
 | `win_binary_url` | Windows: URL of the fork `grok.exe` (carries the OpenRouter fixes). Empty = debug-only fallback to stock grok on PATH. |
 

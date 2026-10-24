@@ -40,7 +40,7 @@ class PiCliConfig:
     ``provider`` mode. ``None`` falls back to the env var documented under
     ``provider``."""
 
-    cli_version: str = "0.85.1"
+    cli_version: str = "1.3.0"
     """Version of ``@earendil-works/pi-coding-agent`` to install via npm."""
 
     thinking_level: str | None = None

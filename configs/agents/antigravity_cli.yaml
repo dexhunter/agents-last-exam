@@ -22,7 +22,7 @@ harness: antigravity_cli
 # executor: sandbox          # only supported value (deployer default).
 
 # One of the display names printed by `agy models` (accepted verbatim by --model).
-model: Gemini 3.7 Flash (High)
+model: Gemini 3.8 Flash (High)
 
 config:
   # Bypass tool-permission prompts (required headless) -> --dangerously-skip-permissions.
@@ -30,7 +30,7 @@ config:
 
   # Exact CLI version. Empty download_url resolves this version through Google's
   # updater manifest and verifies SHA-512; stale binaries are replaced.
-  cli_version: "1.1.25"
+  cli_version: "1.4.1"
   print_timeout: "120m"        # agy --print-timeout; its 5m default truncates long tasks
   download_url: ""
   download_sha512: ""          # required SHA-512 when overriding download_url

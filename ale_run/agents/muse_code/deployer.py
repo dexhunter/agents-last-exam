@@ -122,7 +122,6 @@ class MuseCodeDeployer(BaseAgentDeployer):
             str(wd),
             "--prompt-file",
             str(wd / "prompt.txt"),
-            "--disable-request-user-input",
         ]
         if cfg.yolo:
             argv.append("--yolo")
@@ -140,7 +139,12 @@ class MuseCodeDeployer(BaseAgentDeployer):
             argv.append(
                 "--parallel-tool-calls" if cfg.parallel_tool_calls else "--no-parallel-tool-calls"
             )
-        for name in ("disable_web_tools", "disable_reminders", "no_foreign_personal_context"):
+        for name in (
+            "disable_web_tools",
+            "disable_reminders",
+            "disable_request_user_input",
+            "no_foreign_personal_context",
+        ):
             if getattr(cfg, name):
                 argv.append("--" + name.replace("_", "-"))
         settings = dict(cfg.settings_overrides)
@@ -172,7 +176,13 @@ class MuseCodeDeployer(BaseAgentDeployer):
         env = self._build_env()
         secrets = secret_values(self.config, env)
         (wd / "prompt.txt").write_text(prompt, encoding="utf-8")
-        for name in ("transcript.jsonl", "stderr.log", "native_events.jsonl", "muse.pid"):
+        for name in (
+            "transcript.jsonl",
+            "stderr.log",
+            "native_events.jsonl",
+            "muse.pid",
+            "artifact_collection_error.json",
+        ):
             (wd / name).unlink(missing_ok=True)
         session_root = (
             Path(env.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "muse" / "sessions"
@@ -226,7 +236,14 @@ class MuseCodeDeployer(BaseAgentDeployer):
                     reader.cancel()
             await asyncio.gather(*readers, return_exceptions=True)
             await asyncio.to_thread(mirror.poll)
-            await asyncio.to_thread(mirror.snapshot, self._data_dir)
+            try:
+                await asyncio.to_thread(mirror.snapshot, self._data_dir)
+            except (OSError, shutil.Error) as error:
+                detail = redact(str(error), secrets)
+                (wd / "artifact_collection_error.json").write_text(
+                    json.dumps({"stage": "native_snapshot", "error": detail}), encoding="utf-8"
+                )
+                logger.warning("muse_code: native snapshot failed: %s", detail)
             if self.config.telemetry_enabled:
                 await asyncio.to_thread(recover_telemetry_artifacts, wd)
         terminal = None

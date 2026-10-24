@@ -79,6 +79,11 @@
       </tbody>
     </table>
 
+    <p><code>run.json</code> includes the expanded, redacted agent config.
+      <code>agent.cli_identity</code> records the probed CLI version and selected
+      source when available; unknown values are <code>null</code>.
+      Resume checks task revision, not CLI identity.</p>
+
     <p>
       <code>task.revision</code> is captured before setup: a deterministic SHA256
       of the task folder's file names, contents, executable bits, and link

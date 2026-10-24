@@ -1,6 +1,6 @@
 """CursorCliDeployer — drives the ``cursor-agent`` CLI from Anysphere.
 
-Closed-source binary, installed via ``curl -fsS https://cursor.com/install | bash``.
+Closed-source binary, installed from a pinned official release.
 Bundles its own Node runtime — no separate Node install needed for the
 CLI itself.  Node IS still required for the CUA MCP Server bridge.
 
@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -57,29 +58,27 @@ class CursorCliDeployer(BaseAgentDeployer):
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
     hot_artifacts: ClassVar[tuple[str, ...]] = ("transcript.jsonl", "stderr.log")
 
-    _PINNED_VERSION: ClassVar[str] = "2026.05.28-a70ca7c"
-
     @property
     def version(self) -> str | None:
         cfg: CursorCliConfig = self.config  # type: ignore[assignment]
-        return cfg.cursor_version or self._PINNED_VERSION
+        return cfg.cli_version
 
     # =========================================================================
     # install
     # =========================================================================
 
     @staticmethod
-    def _probe_version(cursor_path: str) -> str:
+    def _probe_version(cursor_path: str, index_path: str | None = None) -> str:
         """Return the ``--version`` string of a cursor-agent binary ("" on error)."""
         try:
             probe = subprocess.run(
-                [cursor_path, "--version"],
+                [cursor_path, *([index_path] if index_path else []), "--version"],
                 capture_output=True, text=True, timeout=30,
             )
         except (subprocess.TimeoutExpired, OSError):
             return ""
         # `--version` prints just the version (e.g. "2026.05.28-a70ca7c").
-        return (probe.stdout or "").strip().splitlines()[0].strip() if probe.stdout else ""
+        return (probe.stdout or "").strip().splitlines()[0].strip() if probe.returncode == 0 and probe.stdout else ""
 
     @staticmethod
     def _download_url(version: str) -> str:
@@ -104,8 +103,7 @@ class CursorCliDeployer(BaseAgentDeployer):
         Mirrors the official installer layout: untar to
         ``~/.local/share/cursor-agent/versions/<version>/`` and symlink
         ``~/.local/bin/cursor-agent`` (and ``agent``) at it. Overrides any
-        mismatched pre-baked copy. Falls back to ``cursor.com/install``
-        (latest-only) only if the versioned download fails.
+        mismatched pre-baked copy.
         """
         home = os.path.expanduser("~")
         version_dir = f"{home}/.local/share/cursor-agent/versions/{version}"
@@ -113,7 +111,7 @@ class CursorCliDeployer(BaseAgentDeployer):
         url = self._download_url(version)
         # Atomic-ish: download+extract into the version dir, then symlink.
         script = (
-            f'set -e; mkdir -p "{version_dir}" "{bin_dir}"; '
+            f'set -eo pipefail; mkdir -p "{version_dir}" "{bin_dir}"; '
             f'curl -fSL -s "{url}" | tar --strip-components=1 -xzf - -C "{version_dir}"; '
             f'rm -f "{bin_dir}/cursor-agent" "{bin_dir}/agent"; '
             f'ln -s "{version_dir}/cursor-agent" "{bin_dir}/cursor-agent"; '
@@ -124,16 +122,12 @@ class CursorCliDeployer(BaseAgentDeployer):
             ["bash", "-c", script],
             capture_output=True, text=True, timeout=180,
         )
-        if bin_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
+        os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
         if proc.returncode != 0:
-            logger.warning(
-                "cursor_cli: pinned download of %s failed (rc=%d): %s — "
-                "falling back to cursor.com/install (latest)",
-                version, proc.returncode, (proc.stderr or "")[:300],
+            raise RuntimeError(
+                f"cursor_cli: pinned download of {version} failed "
+                f"(rc={proc.returncode}): {(proc.stderr or '')[:300]}"
             )
-            await self._auto_install_cli()
-            return
         logger.info("cursor_cli: installed pinned version %s from %s", version, url)
 
     def _install_pinned_windows_sync(self, version: str) -> None:
@@ -192,28 +186,13 @@ class CursorCliDeployer(BaseAgentDeployer):
         self._win_index_js = str(index_js)
         logger.info("cursor_cli: installed pinned Windows version %s at %s", version, version_dir)
 
-    async def _auto_install_cli(self) -> None:
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            ["bash", "-c", "curl -fsS https://cursor.com/install | bash"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"cursor-agent install failed (rc={proc.returncode}): "
-                f"{(proc.stderr or '')[:500]}"
-            )
-        home = os.path.expanduser("~")
-        bin_dir = f"{home}/.local/bin"
-        if bin_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
-        logger.info("cursor_cli: installed — %s", (proc.stdout or "").strip()[-200:])
-
     async def install(self) -> None:
         cfg: CursorCliConfig = self.config  # type: ignore[assignment]
         sandbox = self.executor.sandbox
         self._is_windows = not sandbox.is_linux
-        pinned = cfg.cursor_version or self._PINNED_VERSION
+        pinned = cfg.cli_version
+        if not re.fullmatch(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-zA-Z0-9]+", pinned):
+            raise ValueError(f"cursor_cli: invalid CLI version {pinned!r}")
 
         if self._is_windows:
             # Windows runs via `node.exe index.js` from a versioned dir. Skip the
@@ -227,9 +206,12 @@ class CursorCliDeployer(BaseAgentDeployer):
             )
             node_exe = version_dir / "node.exe"
             index_js = version_dir / "index.js"
-            if node_exe.is_file() and index_js.is_file():
-                self._win_node = str(node_exe)
-                self._win_index_js = str(index_js)
+            self._win_node = str(node_exe)
+            self._win_index_js = str(index_js)
+            current = await asyncio.to_thread(
+                self._probe_version, self._win_node, self._win_index_js,
+            ) if node_exe.is_file() and index_js.is_file() else ""
+            if current == pinned:
                 logger.info(
                     "cursor_cli: pinned Windows version %s already installed at %s — skipping",
                     pinned, version_dir,
@@ -237,6 +219,11 @@ class CursorCliDeployer(BaseAgentDeployer):
             else:
                 logger.info("cursor_cli: installing pinned Windows version %s …", pinned)
                 await asyncio.to_thread(self._install_pinned_windows_sync, pinned)
+            final = await asyncio.to_thread(
+                self._probe_version, self._win_node, self._win_index_js,
+            )
+            if final != pinned:
+                raise RuntimeError(f"cursor_cli: installed version {final!r} != {pinned!r}")
             self._cursor_path = self._win_index_js
         else:
             # Verify-and-correct: keep a pre-installed binary only if it already
@@ -262,7 +249,12 @@ class CursorCliDeployer(BaseAgentDeployer):
                     )
             self._cursor_path = cursor_path
             final = self._probe_version(cursor_path)
+            if final != pinned:
+                raise RuntimeError(f"cursor_cli: installed version {final!r} != {pinned!r}")
             logger.info("cursor_cli: CLI ok — %s (pinned target %s)", final or "unknown", pinned)
+
+        self.actual_cli_version = final
+        self.cli_source = "official"
 
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)

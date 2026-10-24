@@ -1,6 +1,6 @@
-"""OpenHandsCliDeployer — drives the official ``openhands-cli`` pip package.
+"""OpenHandsCliDeployer — drives the official ``openhands`` pip package.
 
-Installed via ``uv pip install openhands-cli==<version>`` (or ``pip``
+Installed via ``uv pip install openhands==<version>`` (or ``pip``
 fallback).  No fork needed; the official package supports all required
 headless flags.
 
@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -63,7 +64,7 @@ JSON_EVENT_DELIMITER = "--JSON Event--"
 
 
 class OpenHandsCliDeployer(BaseAgentDeployer):
-    """Stdlib-only deployer for the ``openhands-cli`` pip package."""
+    """Stdlib-only deployer for the ``openhands`` pip package."""
 
     default_executor: ClassVar[str] = "sandbox"
     supported_executors: ClassVar[frozenset[str]] = frozenset({"sandbox"})
@@ -78,6 +79,15 @@ class OpenHandsCliDeployer(BaseAgentDeployer):
     # install
     # =========================================================================
 
+    @staticmethod
+    def _installed_version(path: str) -> str | None:
+        try:
+            probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        match = re.search(r"\b\d+\.\d+\.\d+\b", probe.stdout or "")
+        return match.group() if probe.returncode == 0 and match else None
+
     async def install(self) -> None:
         cfg: OpenHandsCliConfig = self.config  # type: ignore[assignment]
         sandbox = self.executor.sandbox
@@ -87,9 +97,9 @@ class OpenHandsCliDeployer(BaseAgentDeployer):
 
         # 1. Check if openhands binary already on PATH
         openhands_path = shutil.which("openhands")
-        if not openhands_path:
-            logger.info("openhands_cli: 'openhands' not on PATH, installing v%s ...",
-                        cfg.cli_version)
+        installed = await asyncio.to_thread(self._installed_version, openhands_path) if openhands_path else None
+        if installed != cfg.cli_version:
+            logger.info("openhands_cli: installed version %s, installing %s", installed, cfg.cli_version)
             await self._install_cli(cfg.cli_version)
             openhands_path = shutil.which("openhands")
             if not openhands_path:
@@ -99,15 +109,12 @@ class OpenHandsCliDeployer(BaseAgentDeployer):
         self._openhands_path = openhands_path
 
         # 2. Verify version
-        try:
-            probe = await asyncio.to_thread(
-                subprocess.run,
-                [openhands_path, "--version"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"openhands --version timed out: {e}")
-        logger.info("openhands_cli: CLI ok -- %s", (probe.stdout or "").strip())
+        installed = await asyncio.to_thread(self._installed_version, openhands_path)
+        if installed != cfg.cli_version:
+            raise RuntimeError(f"openhands_cli: installed version {installed!r} != {cfg.cli_version!r}")
+        self.actual_cli_version = installed
+        self.cli_source = "official"
+        logger.info("openhands_cli: CLI ok -- %s", installed)
 
         # 3. Create work directory
         wd = Path(self.executor.work_dir)
@@ -162,7 +169,7 @@ class OpenHandsCliDeployer(BaseAgentDeployer):
                      openhands_home, cfg.model)
 
     async def _install_cli(self, version: str) -> None:
-        """Install openhands-cli via uv pip (with pip fallback)."""
+        """Install openhands via uv pip (with pip fallback)."""
         home = os.path.expanduser("~")
         bin_dir = f"{home}/.local/bin"
         os.makedirs(bin_dir, exist_ok=True)

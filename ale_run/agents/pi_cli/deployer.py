@@ -94,6 +94,8 @@ class PiCliDeployer(BaseAgentDeployer):
             if await _installed_version(pi_path) != cfg.cli_version:
                 raise RuntimeError("pi_cli: installed CLI does not match cli_version")
         self._pi_path = pi_path
+        self.actual_cli_version = cfg.cli_version
+        self.cli_source = "official"
 
         wd = Path(self.executor.work_dir)
         wd.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,7 @@
 adapted for the ALE framework. The CLI runs *inside* the sandbox as a Python
 process; ALE coordinates from outside through the executor.
 
-Uses the official `openhands-cli` pip package (no fork required).
+Uses the official `openhands` pip package (no fork required).
 
 ## Architecture
 
@@ -13,7 +13,7 @@ ALE HOST                                 SANDBOX
 lifecycle.py
   executor.run_deployer()
     OpenHandsCliDeployer
-      install()          -->  pip install openhands-cli==1.15.1
+      install()          -->  pip install openhands==1.16.0
                               write ~/.openhands/.env
                               write ~/.openhands/mcp.json
       launch()           -->  openhands --headless --json --yolo \
@@ -62,7 +62,7 @@ agent:
   model: "anthropic/claude-sonnet-4-6"
   config:
     timeout_s: 600
-    cli_version: "1.15.1"
+    cli_version: "1.16.0"
     disable_condenser: false
     extra_envs: {}
 ```
@@ -71,7 +71,7 @@ agent:
 |---|---|
 | `model` | LiteLLM model id (with provider prefix when using OpenRouter) |
 | `timeout_s` | Wall-clock cap; the deployer terminates the process on overrun |
-| `cli_version` | Version of `openhands-cli` to install from PyPI |
+| `cli_version` | Version of `openhands` to install from PyPI |
 | `disable_condenser` | Sets `OPENHANDS_DISABLE_CONDENSER=1` to suppress the `LLMSummarizingCondenser` |
 | `extra_envs` | Optional dict of extra env vars exported to the runner |
 

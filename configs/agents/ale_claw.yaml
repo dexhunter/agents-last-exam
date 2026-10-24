@@ -58,11 +58,8 @@ config:
   # If true, no GUI subagent — the main agent uses its own `computer`.
   disable_delegate_gui: false
 
-  # Tools dropped from the assembled tool list (matched by BaseTool.name). Defaults
-  # to web_search because BRAVE_API_KEY is rarely provisioned; set to [] to re-enable
-  # (and export BRAVE_API_KEY).
-  disabled_tools:
-    - web_search
+  # Tools dropped from the assembled tool list (matched by BaseTool.name).
+  disabled_tools: []
 
   # ---- thinking levels (off | low | medium | high) ----
   # Base thinking level. null → resolved-default for the model.

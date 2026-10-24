@@ -120,9 +120,10 @@ agent:
 | `supports_usage_in_streaming` | Request streamed token usage metadata; defaults to `true` |
 | `model` | Model slug. OpenRouter: `openai/gpt-5.4`, `anthropic/claude-sonnet-4-6`. Direct: `gpt-5.4` or `claude-sonnet-4-6` |
 | `model_params` | Provider-specific model parameters; use `extra_body` for raw request fields |
+| `model_input_types`, `model_context_window`, `model_max_tokens`, `model_reasoning` | Optional primary-model catalog metadata; requires `base_url` |
 | `cli_version` | Exact official npm package version; defaults to `2026.10.5` |
 | `agent_timeout_s` | Overall OpenClaw agent-run timeout in seconds |
-| `llm_idle_timeout_s` | Legacy setting. Official OpenClaw 2026.10.5 does not support it; the upstream timeout policy applies |
+| `llm_idle_timeout_s` | Optional provider request and LLM idle timeout in seconds; requires `base_url` and also limits the total provider request |
 | `thinking` | Provider-specific reasoning depth; common values are `off`, `on`, `low`, `medium`, `high`, and `max` |
 | `vision_model` | Per-tool model override for image analysis |
 | `vision_provider` | Optional independent route for `vision_model`; `null` inherits `provider` |

@@ -94,11 +94,9 @@ class AleClawConfig:
     disable_delegate_gui: bool = False
     """If True, no GUI subagent — main agent uses its own ``computer``."""
 
-    disabled_tools: list[str] = field(default_factory=lambda: ["web_search"])
+    disabled_tools: list[str] = field(default_factory=list)
     """Tools to drop from the assembled tool list (matched by ``BaseTool.name``).
-    Defaults to ``["web_search"]`` because BRAVE_API_KEY is rarely provisioned;
-    set to ``[]`` to opt back in (and ensure ``BRAVE_API_KEY`` is exported in
-    your shell)."""
+    Empty by default; ``web_search`` requires ``BRAVE_API_KEY`` to work."""
 
     # ---- pointer coordinate space ----
     coordinate_space: str | None = None

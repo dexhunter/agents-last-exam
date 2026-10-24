@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,6 +171,7 @@ def test_argv_consumes_native_knobs(tmp_path):
         execution_capacity=4,
         disable_web_tools=True,
         disable_reminders=True,
+        disable_request_user_input=True,
         base_url="http://localhost:1234/v1",
         toolset=["bash"],
         settings_overrides={"run.context_slimming": False},
@@ -191,6 +193,13 @@ def test_argv_consumes_native_knobs(tmp_path):
     deployer.config.yolo = False
     argv = deployer._build_argv()
     assert "--yolo" not in argv and "--approval-mode" in argv and "--trust-workspace" in argv
+
+
+def test_argv_does_not_disable_tools_by_default(tmp_path):
+    argv = adapter(tmp_path)._build_argv()
+    assert "--disable-request-user-input" not in argv
+    assert "--disable-web-tools" not in argv
+    assert "--disable-reminders" not in argv
 
 
 @pytest.mark.parametrize(
@@ -386,8 +395,15 @@ async def test_launch_checks_terminal_and_redacts_streams(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
 @pytest.mark.asyncio
-async def test_cancellation_reaps_cli_and_child(tmp_path, monkeypatch):
+@pytest.mark.parametrize("snapshot_fails", [False, True])
+async def test_cancellation_reaps_cli_and_child(tmp_path, monkeypatch, snapshot_fails):
     deployer = adapter(tmp_path, api_key="fixture")
+    if snapshot_fails:
+
+        def broken_snapshot(self, destination):
+            raise OSError("snapshot unavailable")
+
+        monkeypatch.setattr(NativeEventMirror, "snapshot", broken_snapshot)
     script = (
         "import subprocess,sys,time\nfrom pathlib import Path\n"
         "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'])\n"
@@ -404,6 +420,7 @@ async def test_cancellation_reaps_cli_and_child(tmp_path, monkeypatch):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 10)
+        assert (tmp_path / "artifact_collection_error.json").exists() == snapshot_fails
         for name in ("muse.pid", "child.pid"):
             pid = int((tmp_path / name).read_text())
             stat = Path(f"/proc/{pid}/stat")
@@ -484,8 +501,10 @@ async def test_success_reaps_lingering_child_and_repeat_launch_isolates_logs(tmp
     result = await asyncio.wait_for(deployer.launch("test"), 15)
     assert result.status == "completed"
     old = (tmp_path / "native_data_path.json").read_text()
+    (tmp_path / "artifact_collection_error.json").write_text("previous launch error")
     result = await asyncio.wait_for(deployer.launch("again"), 15)
     assert result.status == "completed"
+    assert not (tmp_path / "artifact_collection_error.json").exists()
     assert old != (tmp_path / "native_data_path.json").read_text()
     assert (tmp_path / "data_path.txt").read_text() == str(tmp_path / "data-root")
     pid = int((tmp_path / "child.pid").read_text())
@@ -505,7 +524,59 @@ def test_mirror_excludes_old_sessions_and_snapshots_only_native_evidence(tmp_pat
     (current.parent / "trace.json").write_text("{}")
     mirror.poll()
     mirror.snapshot(tmp_path / "evidence")
-    assert not (tmp_path / "evidence/old").exists()
-    assert (tmp_path / "evidence/current/trace.json").is_file()
-    assert "fixture-secret" not in (tmp_path / "evidence/current/session.jsonl").read_text()
+    with zipfile.ZipFile(tmp_path / "evidence/native.zip") as archive:
+        assert set(archive.namelist()) == {"current/trace.json", "current/session.jsonl"}
+        assert "fixture-secret" not in archive.read("current/session.jsonl").decode()
     assert "old session" not in mirror.path.read_text()
+
+
+def test_snapshot_retains_nested_evidence_and_recovers_partial_mirror(tmp_path):
+    root = tmp_path / "native"
+    session = root / "2026/10/19" / ("session-" + "a" * 36)
+    nested = session / "subagent" / ("child-" + "b" * 36)
+    nested.mkdir(parents=True)
+    (session / "session.jsonl").write_text(FIXTURE.read_text())
+    (nested / "session.jsonl").write_text('{"id":"child","payload":{"secret":"fixture-secret"}}\n')
+    artifact = nested / "tool-outputs" / ("c" * 36) / "输出.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"\x89PNG\r\n")
+    mirror = NativeEventMirror(tmp_path, root, ("fixture-secret",))
+    mirror.poll()
+    destination = tmp_path / "muse-data/current"
+    mirror.snapshot(destination)
+    with zipfile.ZipFile(destination / "native.zip") as archive:
+        assert len(archive.namelist()) == len(set(archive.namelist())) == 3
+        assert archive.read(artifact.relative_to(root).as_posix()) == artifact.read_bytes()
+        assert b"fixture-secret" not in archive.read(
+            (nested / "session.jsonl").relative_to(root).as_posix()
+        )
+    (tmp_path / "native_events.jsonl").write_text("")
+    (tmp_path / "native_data_path.json").write_text(json.dumps("muse-data/current"))
+    summary = recover_telemetry_artifacts(tmp_path)
+    assert summary["usage"]["input_tokens"] == 200
+    assert len(summary["api_calls"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rc,terminal", [(0, "completed"), (1, "failed")])
+async def test_snapshot_failure_preserves_agent_outcome(tmp_path, monkeypatch, rc, terminal):
+    deployer = adapter(tmp_path, api_key="secret-fixture")
+    event = {
+        "payload_type": "run.terminal." + terminal,
+        "payload": {"terminal": terminal, "reason": "provider failure"},
+    }
+    script = f"import sys; print({json.dumps(event)!r}); sys.exit({rc})"
+    monkeypatch.setattr(deployer, "_build_argv", lambda: [sys.executable, "-c", script])
+
+    def broken_snapshot(self, destination):
+        raise OSError("snapshot unavailable secret-fixture")
+
+    monkeypatch.setattr(NativeEventMirror, "snapshot", broken_snapshot)
+    result = await deployer.launch("test")
+    assert result.status == terminal
+    assert result.exit_code == rc
+    if rc:
+        assert "provider failure" in result.error
+    assert (tmp_path / "telemetry_summary.json").is_file()
+    error = (tmp_path / "artifact_collection_error.json").read_text()
+    assert "secret-fixture" not in error and "snapshot unavailable" in error
