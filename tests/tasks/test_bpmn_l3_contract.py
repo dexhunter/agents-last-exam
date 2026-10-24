@@ -310,6 +310,7 @@ def test_a45_production_entrypoint_retained_fresh_guest(evidence, tmp_path, monk
         ]
     }
     metadata["starter_scenarios"] = f"{root}/input/starter_project/test_scenarios_L3.json"
+    metadata["starter_compose"] = f"{root}/input/starter_project/docker-compose.yml"
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     async def read_and_score():
@@ -488,6 +489,7 @@ def test_production_desktop_entrypoint_reads_retained_guest_only(
         ]
     }
     metadata["starter_scenarios"] = f"{root}/input/starter_project/test_scenarios_L3.json"
+    metadata["starter_compose"] = f"{root}/input/starter_project/docker-compose.yml"
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     async def read_and_score():

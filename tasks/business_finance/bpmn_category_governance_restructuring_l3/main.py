@@ -304,6 +304,7 @@ async def evaluate(task_cfg, session: cb.DesktopSession) -> list[float]:
             local_bpmn.read_bytes(),
             json.loads(local_scenarios.read_text()),
             lambda receipt: logger.info("bpmn_runtime_evidence=%s", json.dumps(receipt)),
+            compose_file=meta["starter_compose"],
         )
         result = await asyncio.to_thread(
             score_output_bundle,

@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 import time
 import uuid
 from collections import Counter
@@ -62,6 +63,22 @@ PROBE_CHECKS = {
     ),
     "default_flows": ("a33_default_flows_on_exclusive_gateways", "a41_default_flow_exclusivity"),
 }
+ORIGINAL_TASK_OUTPUTS = {
+    "team_drafts_initial_plan": {
+        "out_initial_draft": '{"category":"M&B","cycle":"promotion"}',
+        "out_merchant_candidates": '["merchant-a","merchant-b"]',
+    },
+    "owner_review_and_approve": {
+        "out_approved_plan": '{"category":"M&B","cycle":"promotion"}',
+    },
+    "owner_coordinates_merchants": {
+        "out_coordination_status": "completed",
+        "out_exception_detected": False,
+    },
+    "owner_handles_exception": {"out_exception_resolution": '{"status":"resolved"}'},
+    "team_executes_plan": {"out_execution_report": "completed"},
+    "logistics_capacity_confirmation": {"out_capacity_ok": True},
+}
 
 
 def variable_key(name: str) -> str:
@@ -94,6 +111,26 @@ def validate_manifest(payload: dict) -> list[dict]:
                 and all(isinstance(value, dict) for value in outputs)
             ):
                 raise EvaluationError(f"Invalid per-visit outputs in scenario {row['id']}")
+    return scenarios
+
+
+def complete_original_fixtures(scenarios: list[dict]) -> list[dict]:
+    scenarios = copy.deepcopy(scenarios)
+    runtime_index = 0
+    for scenario in scenarios:
+        if scenario.get("is_structural_check") is True:
+            continue
+        defaults = copy.deepcopy(ORIGINAL_TASK_OUTPUTS)
+        defaults["logistics_capacity_confirmation"]["out_capacity_ok"] = runtime_index % 2 == 0
+        runtime_index += 1
+        outputs = scenario.setdefault("task_outputs", {})
+        for identity, values in defaults.items():
+            supplied = outputs.setdefault(identity, {})
+            for visit in supplied if isinstance(supplied, list) else [supplied]:
+                supplied_keys = {variable_key(name) for name in visit}
+                for name, value in values.items():
+                    if variable_key(name) not in supplied_keys:
+                        visit[name] = copy.deepcopy(value)
     return scenarios
 
 
@@ -295,7 +332,10 @@ class Flowable:
     def request(self, method: str, path: str, *, candidate: bool = False, **kwargs):
         try:
             response = self.session.request(
-                method, self.url + path.lstrip("/"), timeout=self.timeout_s, **kwargs
+                method,
+                self.url + path.lstrip("/"),
+                timeout=kwargs.pop("timeout", self.timeout_s),
+                **kwargs,
             )
         except requests.RequestException as error:
             raise EvaluationError(f"Flowable transport unavailable: {error}") from error
@@ -317,6 +357,39 @@ class Flowable:
             return response.json()
         except ValueError as error:
             raise EvaluationError(f"Invalid Flowable JSON at {path}") from error
+
+    def ensure_ready(self, compose_file: Path | None, *, timeout_s: float = 180) -> dict:
+        deadline = time.monotonic() + timeout_s
+        try:
+            return self.request("GET", "management/engine", timeout=min(5, timeout_s))
+        except EvaluationError:
+            if compose_file is None:
+                raise
+        try:
+            startup = subprocess.run(
+                ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+                capture_output=True,
+                text=True,
+                timeout=max(0.1, deadline - time.monotonic()),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EvaluationError(f"Flowable startup failed: {error}") from error
+        if startup.returncode:
+            raise EvaluationError(
+                f"Flowable startup failed (exit {startup.returncode}): "
+                f"{startup.stdout[-2000:]} {startup.stderr[-2000:]}"
+            )
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                return self.request(
+                    "GET", "management/engine", timeout=min(5, deadline - time.monotonic())
+                )
+            except EvaluationError as error:
+                last_error = error
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        raise EvaluationError(f"Flowable did not become ready before deadline: {last_error}")
 
     def all(self, path: str, **params) -> list[dict]:
         rows = []
@@ -688,12 +761,13 @@ def run_suite(
     api_url: str,
     progress: Callable[[dict], None] = lambda row: None,
     timeout_s: float = 600,
+    compose_file: Path | None = None,
 ) -> dict:
-    scenarios = validate_manifest(manifest)
-    started = time.monotonic()
+    scenarios = complete_original_fixtures(validate_manifest(manifest))
     binding = Bindings(xml)
     api = Flowable(api_url)
-    engine = api.request("GET", "management/engine")
+    engine = api.ensure_ready(compose_file)
+    started = time.monotonic()
     tenant = "ale-eval-" + uuid.uuid4().hex
     deployment = api.deploy(xml, tenant)
     results = probe_results(binding, scenarios)
@@ -742,7 +816,7 @@ def run_suite(
 
 
 async def evaluate_remote(
-    session, xml: bytes, manifest: dict, progress: Callable[[dict], None]
+    session, xml: bytes, manifest: dict, progress: Callable[[dict], None], *, compose_file: str
 ) -> dict:
     validate_manifest(manifest)
     directory = "/home/user/.ale-audit/bpmn-evaluator-" + uuid.uuid4().hex
@@ -767,6 +841,8 @@ async def evaluate_remote(
         directory + "/result.json",
         "--progress",
         directory + "/progress.jsonl",
+        "--compose-file",
+        compose_file,
     ]
     launch = (
         "import subprocess; "
@@ -776,7 +852,7 @@ async def evaluate_remote(
     )
     receipt = await session.run_command("python3 -B -c " + shlex.quote(launch), check=True)
     progress({"phase": "runtime_launched", "directory": directory, "launch_receipt": receipt})
-    deadline = time.monotonic() + 660
+    deadline = time.monotonic() + 840
     seen = 0
     while True:
         if await session.file_exists(directory + "/progress.jsonl"):
@@ -817,6 +893,7 @@ def main():
     parser.add_argument("--progress", required=True)
     parser.add_argument("--api-url", default="http://localhost:8080/flowable-task/process-api")
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--compose-file", type=Path)
     args = parser.parse_args()
     with Path(args.progress).open("x") as stream:
 
@@ -831,6 +908,7 @@ def main():
                 api_url=args.api_url,
                 progress=progress,
                 timeout_s=args.timeout,
+                compose_file=args.compose_file,
             )
         except Exception as error:
             result = {"evaluation_error": str(error), "error_type": type(error).__name__}
