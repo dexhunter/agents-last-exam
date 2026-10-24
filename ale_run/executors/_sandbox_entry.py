@@ -321,7 +321,7 @@ def supervise(spec_path: Path, spec: dict, *, protected: bool = False) -> dict:
                         }
                         logger.error("%s", out["error"])
                     worker_finished = True
-                    if out.get("status") == "timeout":
+                    if out.get("status") == "timeout" or out.get("phase") == "install":
                         break
                 if stop_path.exists() and stop_path.read_text() == token:
                     prior_error = out.get("error") if worker_finished else None
@@ -397,6 +397,7 @@ def run(spec: dict, env: dict | None = None) -> dict:
     for k, v in env.items():
         os.environ[str(k)] = str(v)
 
+    phase = "install"
     try:
         # Install agent-declared Python deps before importing the deployer
         # so top-level imports (e.g. `import yaml`) don't crash.
@@ -441,6 +442,10 @@ def run(spec: dict, env: dict | None = None) -> dict:
                 "sandbox_entry: %s.launch (timeout_s=%.0f)",
                 dep_cls.__name__, timeout_s,
             )
+            (Path(executor.work_dir) / "_agent_started").write_text(
+                str(spec.get("run_token", "")), encoding="utf-8",
+            )
+            phase = "agent_run"
             result = loop.run_until_complete(
                 asyncio.wait_for(
                     deployer.launch(spec["prompt"]),
@@ -465,8 +470,10 @@ def run(spec: dict, env: dict | None = None) -> dict:
         return {
             "ok": False,
             "status": (
-                "timeout" if isinstance(exc, asyncio.TimeoutError) else "failed"
+                "timeout" if phase == "agent_run" and isinstance(exc, asyncio.TimeoutError)
+                else "failed"
             ),
+            "phase": phase,
             "error": f"sandbox_entry: {type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),
         }

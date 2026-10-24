@@ -40,7 +40,12 @@ class TreeDeployer:
         self.executor = executor
 
     async def install(self):
-        pass
+        if self.executor.config.mode == "install_timeout":
+            raise TimeoutError("plugin inspection timed out")
+        if self.executor.config.mode == "install_failure":
+            raise RuntimeError("plugin installation failed")
+        if self.executor.config.mode == "install_hang":
+            await asyncio.Event().wait()
 
     async def launch(self, prompt):
         work = Path(self.executor.work_dir)
@@ -232,6 +237,71 @@ async def test_background_work_uses_remaining_budget(contained_executor):
     assert time.monotonic() - started >= 5
     assert not (work / "output.complete").exists()
     assert_tree_stopped(executor)
+
+
+@pytest.mark.parametrize("mode", ["install_timeout", "install_failure", "install_hang"])
+async def test_real_install_failure_never_marks_launch(contained_executor, mode):
+    executor = contained_executor
+    executor.config.mode = mode
+    result = await asyncio.wait_for(executor.run_deployer(
+        deployer_cls=TreeDeployer, prompt="test", timeout_s=2,
+    ), timeout=8)
+    assert result.status == ("timeout" if mode == "install_hang" else "failed")
+    work = Path(executor.work_dir)
+    assert not (work / "_agent_started").exists()
+    assert not (work / "worker.pid").exists()
+    assert json.loads((work / "_stopped.json").read_text())["stopped"] is True
+    if mode != "install_hang":
+        assert json.loads((work / "_worker_result.json").read_text())["phase"] == "install"
+
+
+@pytest.mark.parametrize("mode", ["install_timeout", "install_failure", "install_hang"])
+async def test_lifecycle_real_install_failure_skips_evaluation(
+    tmp_path, monkeypatch, contained_executor, mode,
+):
+    from ale_run.orchestration import lifecycle
+    from ale_run.orchestration.experiment_spec import AgentSpec, RunUnit
+
+    monkeypatch.chdir(tmp_path)
+    task_directory = tmp_path / "tasks" / "demo" / "test"
+    task_directory.mkdir(parents=True)
+    (task_directory / "main.py").write_text("value = 1\n")
+    executor = contained_executor
+    executor.config.mode = mode
+    env = SimpleNamespace(
+        sandbox=executor.sandbox, session=None, current_phase=None, reset_async=AsyncMock(),
+        close_async=AsyncMock(), reset_session=Mock(),
+    )
+    env.set_phase = lambda phase: setattr(env, "current_phase", phase)
+    driver = SimpleNamespace(
+        setup=AsyncMock(), close=AsyncMock(), evaluate=AsyncMock(), evaluation_timeout_s=None,
+    )
+    executor.gather_dir = AsyncMock(return_value=GatherReport(transport="local"))
+    reference = AsyncMock()
+    monkeypatch.setattr(lifecycle, "resolve_agent", lambda spec: (TreeDeployer, TreeConfig))
+    monkeypatch.setattr(lifecycle, "ALEEnv", lambda **kwargs: env)
+    monkeypatch.setattr(lifecycle, "TaskLoader", lambda path: SimpleNamespace(load=lambda variant: {
+        "description": "test", "snapshot_name": "fake",
+    }))
+    monkeypatch.setattr(lifecycle, "TaskDriver", lambda **kwargs: driver)
+    monkeypatch.setattr(lifecycle, "_build_executor", lambda **kwargs: executor)
+    monkeypatch.setattr(lifecycle, "_stage_task_data", AsyncMock())
+    monkeypatch.setattr(lifecycle, "stage_reference", reference)
+    result = await asyncio.wait_for(lifecycle.run_one_unit(
+        unit=RunUnit("fake", AgentSpec("fake", "fake", executor=executor.type), "demo/test", 0),
+        router=SimpleNamespace(provider_for=lambda snapshot: None),
+        output_root=tmp_path, wall_time_s=3,
+    ), timeout=10)
+    metadata = json.loads((result.run_dir / "run.json").read_text())
+    evaluation = json.loads((result.run_dir / "eval_result.json").read_text())
+    assert result.status == metadata["status"] == "failed"
+    assert result.score is None and metadata["score"] is None
+    assert result.eval_status == "not_executed"
+    assert evaluation["eval_status"] == "not_executed" and evaluation["score"] is None
+    reference.assert_not_awaited()
+    driver.evaluate.assert_not_awaited()
+    executor.gather_dir.assert_awaited_once()
+    env.close_async.assert_awaited_once()
 
 
 @pytest.mark.parametrize("finishes", [False, True])
@@ -490,6 +560,7 @@ async def test_lifecycle_stops_before_reference_and_evaluation(tmp_path, monkeyp
     monkeypatch.setattr(lifecycle, "_stage_task_data", AsyncMock())
     monkeypatch.setattr(lifecycle, "pull_agent_output", AsyncMock())
     monkeypatch.setattr(lifecycle, "stage_reference", reference)
+    monkeypatch.setattr(lifecycle, "_agent_launch_started", AsyncMock(return_value=True))
     operation = asyncio.create_task(lifecycle.run_one_unit(
         unit=RunUnit("fake", AgentSpec("fake", "fake", executor="sandbox"), "demo/test", 0),
         router=SimpleNamespace(provider_for=lambda snapshot: None),
@@ -699,6 +770,24 @@ def test_windows_job_disallows_breakaway_and_waits_for_empty(windows_kernel):
     assert len(observed) == 2
     windows_kernel.AssignProcessToJobObject.assert_called_once()
     windows_kernel.TerminateJobObject.assert_called_once()
+
+
+def test_windows_install_failure_stops_remaining_processes(tmp_path, monkeypatch, windows_kernel):
+    worker = Mock(pid=123, returncode=0)
+    worker.poll.return_value = 0
+    worker.stdin.closed = False
+    monkeypatch.setattr(entry.sys, "platform", "win32")
+    monkeypatch.setattr(entry.subprocess, "Popen", Mock(return_value=worker))
+    (tmp_path / "_worker_result.json").write_text(json.dumps({
+        "ok": False, "status": "failed", "phase": "install", "error": "plugin timed out",
+    }))
+    result = entry.supervise(tmp_path / "_spec.json", {
+        "work_dir": str(tmp_path), "run_token": "test", "timeout_s": 30,
+    })
+    assert result["status"] == "failed"
+    assert result["phase"] == "install"
+    windows_kernel.TerminateJobObject.assert_called_once()
+    assert json.loads((tmp_path / "_stopped.json").read_text())["stopped"] is True
 
 
 @pytest.mark.parametrize("failure", ["CreateJobObjectW", "SetInformationJobObject",

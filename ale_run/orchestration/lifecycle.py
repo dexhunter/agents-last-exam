@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, replace
+import json
 import logging
 import signal
 import time
@@ -420,10 +421,19 @@ async def run_one_unit(
                             writer.emit_event(
                                 "incremental_pull_final_failed", error=reconcile_err,
                             )
+            launch_confirmed = True
+            launch_confirmation_error = None
+            if run_result.status in ("failed", "timeout"):
+                try:
+                    launch_confirmed = await _agent_launch_started(executor)
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    launch_confirmed = False
+                    launch_confirmation_error = f"{type(exc).__name__}: {exc}"
             writer.emit_event(
                 "agent_finished",
-                status=run_result.status,
+                status=run_result.status if launch_confirmed else "failed",
                 error=run_result.error,
+                launch_confirmed=launch_confirmed,
             )
 
             # ============================================================
@@ -456,6 +466,13 @@ async def run_one_unit(
                 writer.emit_event(
                     "origin_log_gather_failed",
                     report={"transport": "?", "files": 0, "error": str(e)},
+                )
+            if not launch_confirmed:
+                env.set_phase("agent_start")
+                detail = launch_confirmation_error or "launch marker absent"
+                raise RuntimeError(
+                    f"agent launch not confirmed; evaluation skipped ({detail}); "
+                    f"original result: {run_result.error or run_result.status}"
                 )
             # ============================================================
             # Phase 3 — gather env output, stage reference, evaluate
@@ -578,7 +595,11 @@ async def run_one_unit(
             else:
                 status = "completed"
 
-            phase = env.current_phase if status != "completed" else None
+            phase = (
+                "agent_run" if status == "timeout" and run_result is not None
+                and run_result.status == "timeout"
+                else env.current_phase if status != "completed" else None
+            )
 
         finally:
             if sem is not None:
@@ -681,6 +702,28 @@ async def run_one_unit(
 # ======================================================================
 # Helpers
 # ======================================================================
+
+
+async def _agent_launch_started(executor: BaseExecutor) -> bool:
+    """Confirm that this executor's deployer passed installation and started launch."""
+    if isinstance(executor, SandboxExecutor):
+        sep = "/" if executor.sandbox.is_linux else "\\"
+        path = f"{executor.work_dir.rstrip(sep)}{sep}_agent_started"
+        expected = executor._run_token
+        try:
+            marker = await asyncio.wait_for(executor.sandbox.read_text(path), timeout=30)
+        except FileNotFoundError:
+            return False
+    else:
+        work_dir = Path(executor.work_dir)
+        try:
+            marker = (work_dir / "_agent_started").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        expected = json.loads((work_dir / "_spec.json").read_text())["run_token"]
+    if not expected or marker != expected:
+        raise RuntimeError("invalid agent launch marker")
+    return True
 
 
 def _extract_score(eval_output: Any) -> float | None:
