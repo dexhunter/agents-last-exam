@@ -37,8 +37,12 @@ def episode(tmp_path, monkeypatch):
         reset_session=Mock(),
     )
     environment.set_phase = lambda phase: setattr(environment, "current_phase", phase)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "_spec.json").write_text(json.dumps({"run_token": "judge-test"}))
+    (work_dir / "_agent_started").write_text("judge-test")
     executor = SimpleNamespace(
-        work_dir=str(tmp_path / "work"),
+        work_dir=str(work_dir),
         run_deployer=AsyncMock(),
         stop_deployer=AsyncMock(),
         gather_dir=AsyncMock(return_value=GatherReport(transport="local")),
