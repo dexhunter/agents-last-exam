@@ -43,20 +43,5 @@ config:
   # schedules background work.
   keepalive_preamble: true
 
-  # Toolsets turned on (hermes-agent toolsets.py ids + runtime mcp-<server> ids).
-  # hermes is enable-only: the harness has no deny flag, so this allow list is the
-  # sole tool-control knob (an exception to the project's deny-only convention, by
-  # harness constraint). Anything not listed here is off.
-  toolsets_enabled:
-    - terminal           # always-on core
-    - file
-    - skills
-    - todo
-    - memory
-    - web                # network research (benchmark allows internet)
-    - vision
-    - browser            # local Chromium via Playwright (no BROWSERBASE_API_KEY)
-    - code_execution     # long-run optimizations
-    - delegation
-    - cronjob
-    - mcp-cua            # ALE bridge
+  # Optional explicit allowlist. null uses Hermes defaults and registered MCP servers.
+  toolsets_enabled: null

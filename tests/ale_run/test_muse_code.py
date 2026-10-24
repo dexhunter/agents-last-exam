@@ -171,6 +171,7 @@ def test_argv_consumes_native_knobs(tmp_path):
         execution_capacity=4,
         disable_web_tools=True,
         disable_reminders=True,
+        disable_request_user_input=True,
         base_url="http://localhost:1234/v1",
         toolset=["bash"],
         settings_overrides={"run.context_slimming": False},
@@ -192,6 +193,13 @@ def test_argv_consumes_native_knobs(tmp_path):
     deployer.config.yolo = False
     argv = deployer._build_argv()
     assert "--yolo" not in argv and "--approval-mode" in argv and "--trust-workspace" in argv
+
+
+def test_argv_does_not_disable_tools_by_default(tmp_path):
+    argv = adapter(tmp_path)._build_argv()
+    assert "--disable-request-user-input" not in argv
+    assert "--disable-web-tools" not in argv
+    assert "--disable-reminders" not in argv
 
 
 @pytest.mark.parametrize(

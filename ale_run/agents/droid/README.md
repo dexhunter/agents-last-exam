@@ -14,9 +14,8 @@ droid exec -f <prompt> -m <model> --output-format stream-json
 
 `droid` keeps its native built-in tools (Read, Edit, Execute, Glob,
 Grep, LS, Create, ApplyPatch, FetchUrl, TodoWrite, Skill, Task,
-ToolSearch) alongside the CUA bridge tools. The deployer ships with
-a `disabled_tools` baseline that turns off Factory-cloud-only / SaaS
-integrations and interactive helpers that block headless runs.
+ToolSearch) alongside the CUA bridge tools. `disabled_tools` is empty by
+default; tools requiring interactive input or external credentials may fail.
 
 ## Architecture
 

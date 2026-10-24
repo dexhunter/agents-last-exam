@@ -8,22 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-# Deny-only tool policy: only disabled tools are listed (no allow list). WebSearch
-# is intentionally NOT disabled — internet is allowed, so web access is on.
-_DISABLED_TOOLS = (
-    "squad-board",
-    "slack_post_message",
-    "store_agent_readiness_report",
-    "GenerateDroid",
-    "ProposeMission",
-    "StartMissionRun",
-    "EndFeatureRun",
-    "DismissHandoffItems",
-    "ExitSpecMode",
-    "AskUser",
-)
-
-
 @dataclass
 class DroidConfig:
     """Tunables for :class:`DroidDeployer`.
@@ -71,4 +55,4 @@ class DroidConfig:
     # higher values get a hard 400 on the first call).
     max_output_tokens: int = 128000
     byok_provider: str = "generic-chat-completion-api"
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS
+    disabled_tools: tuple[str, ...] = ()

@@ -247,12 +247,21 @@ def test_build_argv_uses_supported_headless_flags(tmp_path: Path) -> None:
     assert "--always-approve" in argv
     assert "--no-auto-update" in argv
     assert "--disable-web-search" not in argv
-    assert "--no-plan" in argv
-    assert argv[argv.index("--disallowed-tools") + 1] == (
-        "ask_user_question,enter_plan_mode,exit_plan_mode,image_gen"
-    )
+    assert "--no-plan" not in argv
+    assert argv[argv.index("--disallowed-tools") + 1] == "image_gen,ask_user_question"
     assert argv[argv.index("--reasoning-effort") + 1] == "high"
     assert argv[argv.index("--max-turns") + 1] == "42"
+
+
+def test_build_argv_does_not_disable_tools_by_default(tmp_path: Path) -> None:
+    config = GrokBuildConfig()
+    deployer = GrokBuildDeployer(_executor(tmp_path, config))
+    deployer._grok_path = "/opt/grok"
+
+    argv = deployer._build_argv(config, grok_cwd=tmp_path, prompt_file=tmp_path / "prompt")
+
+    assert "--disallowed-tools" not in argv
+    assert "--no-plan" not in argv
 
 
 def test_windows_grok_cwd_is_short_stable_and_linux_uses_work_dir(

@@ -8,34 +8,12 @@ follow-up, tool-result truncation guards).
 Auth: ``OPENROUTER_API_KEY`` routed through OpenRouter.  Provider is
 configurable via ``provider`` field but defaults to ``openrouter``.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import ClassVar
 
-# Toolset ids match hermes-agent/toolsets.py::TOOLSETS plus runtime-registered
-# ``mcp-<server>`` ids. hermes is enable-only: ``--toolsets`` lists exactly the
-# toolsets to turn on, and anything not listed is off. There is no deny list
-# (the harness has no disable flag), so unlike other agents hermes carries an
-# allow list rather than a deny list — by harness constraint, not preference.
-DEFAULT_TOOLSETS: tuple[str, ...] = (
-    # Always-on core
-    "terminal",
-    "file",
-    "skills",
-    "todo",
-    "memory",
-    # Network research (benchmark allows internet)
-    "web",
-    "vision",
-    "browser",       # local Chromium via Playwright; no BROWSERBASE_API_KEY needed
-    # Long-run optimizations
-    "code_execution",
-    "delegation",
-    "cronjob",
-    # ALE bridge
-    "mcp-cua",
-)
 
 @dataclass
 class HermesConfig:
@@ -82,10 +60,8 @@ class HermesConfig:
     agent yaml), it travels with the serialized config — no env passthrough
     whitelist change and no collision with a real OPENROUTER_API_KEY."""
 
-    # Toolset configuration. hermes is enable-only (the harness exposes no deny
-    # flag), so this allow list is the sole tool-control knob — by harness
-    # constraint, not a departure from the project's deny-only convention.
-    toolsets_enabled: tuple[str, ...] = DEFAULT_TOOLSETS
+    toolsets_enabled: tuple[str, ...] | None = None
+    """Optional explicit toolset allowlist; None uses the CLI defaults."""
 
     # Prepend a keepalive preamble to every prompt so the agent knows not
     # to end the chat process early when it schedules background work.

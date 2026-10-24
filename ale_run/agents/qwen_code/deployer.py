@@ -176,22 +176,11 @@ class QwenCodeDeployer(BaseAgentDeployer):
             cfg.model,
             "--session-id",
             self._session_id,
-            "--allowed-mcp-server-names",
-            "cua",
             "--append-system-prompt",
             _GUI_INSTRUCTIONS,
         ]
-        disabled = tuple(
-            dict.fromkeys(
-                (
-                    "ask_user_question",
-                    "enter_plan_mode",
-                    "exit_plan_mode",
-                    *cfg.disabled_tools,
-                )
-            )
-        )
-        argv += ["--exclude-tools", ",".join(disabled)]
+        if cfg.disabled_tools:
+            argv += ["--exclude-tools", ",".join(dict.fromkeys(cfg.disabled_tools))]
         for field, flag in (
             ("max_turns", "--max-session-turns"),
             ("max_tool_calls", "--max-tool-calls"),

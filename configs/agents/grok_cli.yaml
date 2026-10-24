@@ -43,29 +43,5 @@ config:
   # win VM). Used on Windows instead of bundle_url. "" = use stock grok.exe (debug only).
   win_binary_url: https://github.com/cua-verse/grok-cli/releases/download/v0.1.1-agenthle/grok-x86_64-pc-windows.exe
 
-  # Tools dropped over OpenRouter: 12 computer_* (need the unpublished agent-desktop
-  # binary) + 9 xAI-only / payment / lsp tools unavailable via OpenRouter.
-  disabled_tools:
-    - computer_snapshot
-    - computer_screenshot
-    - computer_click
-    - computer_mouse_move
-    - computer_type
-    - computer_press
-    - computer_scroll
-    - computer_launch
-    - computer_list_windows
-    - computer_focus_window
-    - computer_wait
-    - computer_get
-    # search_web/search_x stay disabled NOT as web policy — they are xAI
-    # Responses-API tools that simply don't exist over OpenRouter (would error).
-    - search_web
-    - search_x
-    - generate_image
-    - generate_video
-    - wallet_info        # xAI payment / wallet (no wallet on benchmark VMs)
-    - wallet_history
-    - fetch_payment_info
-    - paid_request
-    - lsp                # no language server running on VMs
+  # Optional tool exclusions written to user-settings.json.
+  disabled_tools: []

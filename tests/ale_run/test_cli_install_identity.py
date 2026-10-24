@@ -77,7 +77,7 @@ def test_droid_checks_reinstalls_and_rechecks(tmp_path, monkeypatch, initial, in
 def test_droid_resolves_unavailable_legacy_tool(
     tmp_path, monkeypatch, returncode, stderr, expected_squad
 ):
-    cfg = DroidConfig()
+    cfg = DroidConfig(disabled_tools=("squad-board", "AskUser"))
     executor = SimpleNamespace(config=cfg, work_dir=str(tmp_path), env={})
     deployer = DroidDeployer(executor)
     deployer._droid_path = "droid"

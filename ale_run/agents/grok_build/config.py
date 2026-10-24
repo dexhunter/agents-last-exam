@@ -32,7 +32,7 @@ class GrokBuildConfig:
     max_turns: int | None = None
 
     disabled_tools: tuple[str, ...] = ()
-    """Additional tools to remove beyond ALE's mandatory headless exclusions."""
+    """Tools to remove from the CLI's defaults; empty by default."""
 
     otel_enabled: bool = True
     """Capture Grok Build's native external OpenTelemetry stream run-locally."""

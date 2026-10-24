@@ -122,7 +122,6 @@ class MuseCodeDeployer(BaseAgentDeployer):
             str(wd),
             "--prompt-file",
             str(wd / "prompt.txt"),
-            "--disable-request-user-input",
         ]
         if cfg.yolo:
             argv.append("--yolo")
@@ -140,7 +139,12 @@ class MuseCodeDeployer(BaseAgentDeployer):
             argv.append(
                 "--parallel-tool-calls" if cfg.parallel_tool_calls else "--no-parallel-tool-calls"
             )
-        for name in ("disable_web_tools", "disable_reminders", "no_foreign_personal_context"):
+        for name in (
+            "disable_web_tools",
+            "disable_reminders",
+            "disable_request_user_input",
+            "no_foreign_personal_context",
+        ):
             if getattr(cfg, name):
                 argv.append("--" + name.replace("_", "-"))
         settings = dict(cfg.settings_overrides)

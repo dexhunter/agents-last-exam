@@ -16,34 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-# Deny-only tool policy: we list ONLY the tools to disable and never an allow
-# list (an allow+deny pair is confusing, and the full per-agent tool inventory
-# is hard to pin down). Native filesystem tools therefore stay enabled — the
-# agenthle fork forwards their tool-result content correctly over OpenRouter.
-#
-# Persistent-state / interactive / tracker tools are disabled (they don't fit
-# headless benchmark runs). Web tools (google_web_search, web_fetch) are
-# intentionally left ENABLED: the benchmark allows internet, so web access is
-# harmonized to "on" across agents that can support it.
-_DISABLED_TOOLS = (
-    "save_memory",
-    "activate_skill",
-    "get_internal_docs",
-    "write_todos",
-    "ask_user",
-    "enter_plan_mode",
-    "exit_plan_mode",
-    "update_topic",
-    "complete_task",
-    "tracker_create_task",
-    "tracker_update_task",
-    "tracker_get_task",
-    "tracker_list_tasks",
-    "tracker_add_dependency",
-    "tracker_visualize",
-)
-
-
 @dataclass
 class GeminiCliConfig:
     """Tunables for :class:`GeminiCliDeployer`.
@@ -65,6 +37,6 @@ class GeminiCliConfig:
     # timeout is the real cap). Written into settings.json as maxSessionTurns.
     max_session_turns: int = -1
 
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS
+    disabled_tools: tuple[str, ...] = ()
     npm_package: str = "https://github.com/cua-verse/gemini-cli/releases/download/v0.38.8-agenthle/google-gemini-cli-0.38.8.tgz"
     compression_model: str = "google/gemini-3-flash-preview"

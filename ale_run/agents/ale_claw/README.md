@@ -76,8 +76,7 @@ At least one LLM provider key must be present in the environment
 `base_url` + `api_key` in the config to point litellm at a custom
 OpenAI-compatible gateway instead (see the config knobs below).
 
-To enable `web_search`, also export `BRAVE_API_KEY` and remove
-`web_search` from `disabled_tools`.
+`web_search` requires `BRAVE_API_KEY` when invoked.
 
 ## The config knobs that matter first
 

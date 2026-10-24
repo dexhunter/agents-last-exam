@@ -18,7 +18,6 @@ upstream OpenRouter PR adapted to this release. ALE-specific fixes on top:
 - In non-interactive `yolo` mode, allow residual `ASK_USER` policy decisions
   for executable tools instead of throwing
   `requires user confirmation, which is not supported in non-interactive mode`.
-  The `ask_user` tool itself is still denied by policy.
 
 ## Install
 
@@ -58,14 +57,12 @@ Because `gemini -p` is non-interactive, any tool policy result of `ASK_USER`
 turns into a hard failure. The deployer therefore writes
 `~/.gemini/agenthle_policy.toml` and references it from `settings.json`
 `policyPaths`. The policy allows tools in `yolo` mode with
-`allowRedirection = true` and denies `ask_user`.
+`allowRedirection = true`.
 
 ## Tool Surface
 
-Gemini CLI exposes built-in tools plus MCP-discovered tools. The deployer keeps
-the VM-local built-ins needed for benchmark tasks and disables provider-side,
-interactive, persistent-state, and non-benchmark tools via
-`settings.tools.exclude`.
+Gemini CLI exposes built-in tools plus MCP-discovered tools. The deployer does
+not exclude tools by default. An experiment can set `disabled_tools` explicitly.
 
 Kept Gemini built-ins:
 
@@ -76,16 +73,6 @@ Kept Gemini built-ins:
 | `read_file`, `write_file`, `list_directory` | supported | VM filesystem access. |
 | `glob`, `grep_search`, `read_many_files` | supported | VM-local file discovery/search. |
 | `replace` | supported | VM-local edit tool. |
-
-Disabled Gemini built-ins:
-
-| Tool | Reason |
-|---|---|
-| `google_web_search`, `web_fetch` | Provider-side web access, outside benchmark scope. |
-| `save_memory`, `activate_skill`, `get_internal_docs`, `write_todos` | Persistent/local Gemini CLI state not backed by ALE task contract. |
-| `ask_user` | Interactive; explicitly denied for headless runs. |
-| `enter_plan_mode`, `exit_plan_mode`, `update_topic`, `complete_task` | Session-control tools not part of ALE runner contract. |
-| `tracker_create_task`, `tracker_update_task`, `tracker_get_task`, `tracker_list_tasks`, `tracker_add_dependency`, `tracker_visualize` | Tracker backend is not provisioned on benchmark environments. |
 
 CUA MCP tools are not disabled. Gemini sees them as MCP FQNs from the `cua`
 server. The bridge exposes keyboard actions, pointer actions, `wait`,

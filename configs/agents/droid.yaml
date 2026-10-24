@@ -42,17 +42,5 @@ config:
   # BYOK wire protocol for the customModels entry.
   byok_provider: generic-chat-completion-api
 
-  # Deny-only policy: only disabled tools are configured (no allow list). These
-  # are interactive / platform tools that don't fit headless runs. WebSearch is
-  # intentionally kept ENABLED — internet is allowed.
-  disabled_tools:
-    - squad-board
-    - slack_post_message
-    - store_agent_readiness_report
-    - GenerateDroid
-    - ProposeMission
-    - StartMissionRun
-    - EndFeatureRun
-    - DismissHandoffItems
-    - ExitSpecMode
-    - AskUser
+  # Optional tool exclusions passed to --disabled-tools.
+  disabled_tools: []

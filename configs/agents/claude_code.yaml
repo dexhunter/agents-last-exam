@@ -66,17 +66,8 @@ config:
   # (omit the thinking param; required for adaptive models over OpenRouter).
   max_thinking_tokens: 31999
 
-  # Built-in CC tools that deadlock or corrupt state headless — passed as
-  # repeated --disallowedTools. Default drops interactive / session-mutating tools.
-  disabled_tools:
-    - EnterPlanMode       # plan mode waits for a human accept
-    - ExitPlanMode
-    - EnterWorktree       # mutate session CWD with persistent side effects
-    - ExitWorktree
-    - AskUserQuestion     # pure user-interaction tool, no headless equivalent
-    - TaskOutput          # background-task lifecycle (no running task id headless)
-    - TaskStop
-    - RemoteTrigger       # needs a logged-in claude.ai account
+  # Optional tool exclusions passed as repeated --disallowedTools.
+  disabled_tools: []
 
   # Pinned npm spec — the deployer probes `claude --version` and (re)installs
   # when the installed version mismatches the version encoded here.

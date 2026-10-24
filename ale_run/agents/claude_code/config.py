@@ -24,29 +24,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-# Built-in Claude Code tools that break headless (`-p`) runs. Mirrors the
-# default disabled_tools list shipped in agenthle's claude_code_openrouter.yaml
-# — passed to the CLI as repeated ``--disallowedTools`` flags. Each either
-# blocks on human interaction or mutates persistent session state with no
-# headless equivalent, so leaving them enabled risks deadlocks.
-_DISABLED_TOOLS = (
-    # Plan mode needs interactive user approval (ExitPlanMode waits for a
-    # human accept) — deadlocks headless runs.
-    "EnterPlanMode",
-    "ExitPlanMode",
-    # Worktree tools mutate session CWD with persistent side effects.
-    "EnterWorktree",
-    "ExitWorktree",
-    # Pure user-interaction tool — no headless equivalent.
-    "AskUserQuestion",
-    # Background task lifecycle (no running task ID exists in headless).
-    "TaskOutput",
-    "TaskStop",
-    # Requires a logged-in claude.ai account; benchmark VMs are not.
-    "RemoteTrigger",
-)
-
-
 @dataclass
 class ClaudeCodeConfig:
     """Tunables for :class:`ClaudeCodeDeployer`.
@@ -98,7 +75,7 @@ class ClaudeCodeConfig:
     """Maximum output tokens requested from the model through Claude Code's
     ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` environment variable. ``None`` leaves the
     CLI default unchanged."""
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS
+    disabled_tools: tuple[str, ...] = ()
     dangerously_skip_permissions: bool = True
 
     otel_enabled: bool = True

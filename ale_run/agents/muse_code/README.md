@@ -35,7 +35,7 @@ Do not put credentials in overrides; use `META_API_KEY` or `config.api_key`.
 | Context | `context_window` sets the native provider context limit. `auto_compact_token_limit` requires it and converts an absolute limit into a soft fraction. |
 | Compaction | Optional native strategy and soft/hard fractions; unset values keep native behavior. |
 | Tool execution | `parallel_tool_calls`, `max_tool_output_bytes`, `execution_capacity`; unset values keep native defaults. |
-| Tool selection | Optional `toolset` allowlist, always extended with `mcp__cua__*`; native web tools and reminders have independent disable switches. |
+| Tool selection | Optional `toolset` allowlist, always extended with `mcp__cua__*`; web tools, reminders, and user input have independent disable switches, all off by default. |
 | Personal context | `no_foreign_personal_context: true` excludes personal rules/skills imported from other harnesses. |
 | GUI MCP | The same ALE `cua_mcp_server`, sandbox Node path, platform, and server URL used by Codex/Claude. `coordinate_space: pixel` is explicit; normalized coordinates are optional. |
 | Telemetry | `telemetry_enabled: true` derives API usage/timings, provider attempts and tool timings from native session events. |

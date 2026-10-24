@@ -58,8 +58,7 @@ hermes chat \
   --yolo \
   --accept-hooks \
   --ignore-rules \
-  --pass-session-id \
-  --toolsets "terminal,file,skills,todo,memory,web,vision,browser,code_execution,delegation,cronjob,mcp-cua"
+  --pass-session-id
 ```
 
 | Flag | Purpose |
@@ -71,7 +70,7 @@ hermes chat \
 | `--ignore-rules` | Skip auto-injection of `AGENTS.md` / `SOUL.md` / `.cursorrules`. |
 | `--max-turns N` | Hard turn cap (100000 so wall-clock timeout is the real cap). |
 | `--pass-session-id` | Inject session id into system prompt for post-run lookup. |
-| `--toolsets <csv>` | Exhaustive enabled list. |
+| `--toolsets <csv>` | Optional explicit enabled list. |
 
 ## Transcript Recovery
 
@@ -106,20 +105,13 @@ session = {
 
 ## Tool Classification
 
-| Toolset | Status | Reason |
-|---|:---:|---|
-| `terminal`, `file`, `skills`, `todo`, `memory` | enabled | Core agent capabilities. |
-| `web`, `vision`, `browser` | enabled | Network research + local Chromium via Playwright. |
-| `code_execution`, `delegation`, `cronjob` | enabled | Long-run optimization. |
-| `mcp-cua` (18 tools) | enabled | CUA bridge (screenshot, click, type, key, scroll, etc.). |
-| `search`, `image_gen`, `rl`, `tts`, `moa` | disabled | Redundant or requires extra API keys. |
-| `session_search`, `clarify`, `messaging` | disabled | No TTY / no gateway. |
-| Platform-specific (`homeassistant`, `kanban`, `discord`, etc.) | disabled | Requires credentials not available in sandbox. |
+The deployer leaves tool selection to Hermes by default and registers the CUA
+bridge when available. `toolsets_enabled` supplies an optional explicit allowlist.
 
 ## Pitfalls
 
 - **No NDJSON output**: trajectories are SQLite-backed. Relies on `hermes sessions export --session-id` post-run.
-- **MCP tools filtered by `mcp-<server>` toolset name**: deployer explicitly includes `mcp-cua` in toolsets.
+- **MCP toolsets**: explicitly configured toolsets must include `mcp-cua` to use the CUA bridge.
 - **Memory double-suppressed by `--ignore-rules`**: the in-session `memory` tool reports "not available". Cross-session value is zero anyway on fresh sandbox images.
 - **`max_turns` has no unlimited sentinel**: `-1` would stop on turn 1. We use `100_000`.
 - **`hermes chat -q` exit IS the run-end signal**: `KEEPALIVE_PREAMBLE` instructs the agent to keep the session alive for async work.

@@ -39,11 +39,6 @@ _MIN_NODE_VERSION = (20, 0, 0)
 _DATA_URL_RE = re.compile(r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=_-]+)")
 _CUSTOM_MODEL_ALIAS = "ale-custom"
 _SANDBOX_PROFILE = "off"
-_HEADLESS_DISABLED_TOOLS = (
-    "ask_user_question",
-    "enter_plan_mode",
-    "exit_plan_mode",
-)
 _SESSION_EXPORTS = {
     "chat_history.jsonl": "session_chat_history.jsonl",
     "updates.jsonl": "session_updates.jsonl",
@@ -563,17 +558,11 @@ class GrokBuildDeployer(BaseAgentDeployer):
             "streaming-json",
             "--sandbox",
             _SANDBOX_PROFILE,
-            "--no-plan",
             "--always-approve",
             "--no-auto-update",
         ]
-        disabled_tools = tuple(dict.fromkeys((*_HEADLESS_DISABLED_TOOLS, *config.disabled_tools)))
-        argv.extend(
-            [
-                "--disallowed-tools",
-                ",".join(disabled_tools),
-            ]
-        )
+        if config.disabled_tools:
+            argv.extend(["--disallowed-tools", ",".join(dict.fromkeys(config.disabled_tools))])
         if config.reasoning_effort:
             argv.extend(["--reasoning-effort", config.reasoning_effort])
         if config.max_turns is not None:

@@ -51,40 +51,6 @@ _NATIVE_TO_OPENROUTER: dict[str, str] = {
     "grok-3-mini-fast": "x-ai/grok-3-mini",
 }
 
-# 12 computer_* tools — require unpublished agent-desktop binary.
-_DISABLED_TOOLS_BASE = (
-    "computer_snapshot",
-    "computer_screenshot",
-    "computer_click",
-    "computer_mouse_move",
-    "computer_type",
-    "computer_press",
-    "computer_scroll",
-    "computer_launch",
-    "computer_list_windows",
-    "computer_focus_window",
-    "computer_wait",
-    "computer_get",
-)
-
-# 21 tools total — base 12 + 9 xAI/payment/lsp tools unavailable via
-# OpenRouter.  Matches the canonical list in grok_cli_openrouter.yaml.
-_DISABLED_TOOLS_OPENROUTER = _DISABLED_TOOLS_BASE + (
-    # xAI Responses API (web/X search, image/video generation)
-    "search_web",
-    "search_x",
-    "generate_image",
-    "generate_video",
-    # xAI payment / wallet (no wallet on benchmark VMs)
-    "wallet_info",
-    "wallet_history",
-    "fetch_payment_info",
-    "paid_request",
-    # LSP (no language server running on VMs)
-    "lsp",
-)
-
-
 def native_to_openrouter_model(model: str) -> str:
     # Already a provider-qualified OpenRouter id ("anthropic/claude-...",
     # "openai/gpt-...", "x-ai/grok-...", "google/..."): pass through unchanged.
@@ -139,7 +105,7 @@ class GrokCliConfig:
     # the deployer maps -1 → 100_000 because grok-cli's loop has no native
     # "no cap" mode). Direct grok_cli.yaml uses 400.
     max_tool_rounds: int = -1
-    disabled_tools: tuple[str, ...] = _DISABLED_TOOLS_OPENROUTER
+    disabled_tools: tuple[str, ...] = ()
 
     bundle_url: str = _DEFAULT_BUNDLE_URL
     """URL to download the pre-built fork bundle (grok-bundle.js) from a

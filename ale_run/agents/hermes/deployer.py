@@ -10,7 +10,7 @@ Playwright Chromium, write ``~/.hermes/config.yaml`` with model config,
 compression settings, and MCP server config (CUA bridge).
 
 Launch: ``hermes chat -q "<prompt>" -Q --provider openrouter --model <m>
---toolsets <csv> --yolo --accept-hooks --ignore-rules --max-turns N
+--yolo --accept-hooks --ignore-rules --max-turns N
 --pass-session-id``.
 
 Transcript recovery: Hermes persists sessions in SQLite at
@@ -359,12 +359,6 @@ class HermesDeployer(BaseAgentDeployer):
                 "timeout": 300,
                 "max_tool_calls": 50,
             },
-            "platform_toolsets": {
-                "cli": [
-                    t for t in cfg.toolsets_enabled
-                    if mcp_available or t != "mcp-cua"
-                ],
-            },
             "display": {
                 "compact": True,
                 "tool_progress": "off",
@@ -388,6 +382,13 @@ class HermesDeployer(BaseAgentDeployer):
             ),
             "hooks_auto_accept": True,
         }
+        if cfg.toolsets_enabled:
+            config["platform_toolsets"] = {
+                "cli": [
+                    tool for tool in cfg.toolsets_enabled
+                    if mcp_available or tool != "mcp-cua"
+                ],
+            }
 
         if cfg.base_url:
             config["model"]["base_url"] = cfg.base_url
@@ -462,7 +463,7 @@ class HermesDeployer(BaseAgentDeployer):
         mcp_available = self._cua_bridge_available(self.executor.sandbox)
         mcp_index = self._cua_bridge_index(self.executor.sandbox)
         enabled_toolsets = [
-            t for t in cfg.toolsets_enabled
+            t for t in (cfg.toolsets_enabled or ())
             if mcp_available or t != "mcp-cua"
         ]
         toolsets_csv = ",".join(enabled_toolsets) if enabled_toolsets else ""

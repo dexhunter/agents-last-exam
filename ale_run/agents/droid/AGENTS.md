@@ -46,8 +46,7 @@ droid exec \
     --output-format stream-json \
     --skip-permissions-unsafe \
     --reasoning-effort medium \
-    --cwd /home/kasm-user/work \
-    --disabled-tools 'AskUser,squad-board,slack_post_message,...'
+    --cwd /home/kasm-user/work
 ```
 
 Required flags:
@@ -59,13 +58,13 @@ Required flags:
 | `--output-format stream-json` | NDJSON event stream the deployer parses |
 | `--skip-permissions-unsafe` | Allows ALL tools; only fully-headless mode |
 | `--cwd <dir>` | Pin the working dir |
-| `--disabled-tools <csv>` | Strip Factory-cloud SaaS / interactive tools |
 
 Optional:
 
 | Flag | Reason |
 |---|---|
 | `--reasoning-effort {off\|none\|low\|medium\|high}` | Defaults per model |
+| `--disabled-tools <csv>` | Explicit tool exclusions; empty by default |
 | `--enabled-tools <csv>` | Whitelist; rarely needed |
 
 ## Auth
@@ -108,22 +107,8 @@ Per-session origin log:
 
 ## Tool Classification
 
-### Disabled by default (Factory-cloud / interactive)
-
-| Tool | Reason |
-|---|---|
-| `squad-board` | Factory cloud SaaS, disabled when supported by the installed CLI |
-| `slack_post_message` | External comms |
-| `store_agent_readiness_report` | Factory cloud |
-| `GenerateDroid` | Factory cloud — sub-agent generation |
-| `ProposeMission` | Factory cloud — mission lifecycle |
-| `StartMissionRun` | Factory cloud |
-| `EndFeatureRun` | Factory cloud |
-| `DismissHandoffItems` | Factory cloud |
-| `ExitSpecMode` | Factory cloud |
-| `AskUser` | Interactive — would block headless runs |
-
-### Kept enabled (24 tools, all verified)
+No tools are excluded by default. Interactive and cloud-backed tools may not
+work in a headless sandbox without their external services.
 
 Built-in: Read, Edit, Execute, Glob, Grep, LS, Create, ApplyPatch,
 FetchUrl, TodoWrite, Skill, Task, ToolSearch, WebSearch, Write.

@@ -25,7 +25,6 @@ HermesDeployer
     launch()   ──────────────→  setsid bash hermes_runner.sh
                                   hermes chat -q "<prompt>" -Q \
                                     --provider openrouter --model <m> \
-                                    --toolsets <full csv incl. mcp-cua> \
                                     --yolo --accept-hooks --ignore-rules \
                                     --max-turns 100000 --pass-session-id
                                   → ~/.hermes/state.db (SQLite)
