@@ -95,12 +95,107 @@ def test_wait_for_deleted_child_and_parent_continuation(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_unreadable_subagent_state_fails_instead_of_hanging(tmp_path, monkeypatch):
+def test_unreadable_subagent_state_waits_for_recovery_or_timeout(tmp_path, monkeypatch):
     deployer = _deployer(tmp_path)
     monkeypatch.setattr(module, "_SUBAGENT_POLL_S", 0.01)
     monkeypatch.setattr(module, "_STATE_READ_TIMEOUT_S", 0.03)
-    with pytest.raises(RuntimeError, match="subagent state could not be read"):
-        asyncio.run(asyncio.wait_for(deployer._wait_for_subagents(None), 1))
+    monkeypatch.setattr(module, "_SUBAGENT_SETTLE_S", 0.02)
+
+    async def exercise():
+        waiter = asyncio.create_task(deployer._wait_for_subagents(None))
+        await asyncio.sleep(0.09)
+        assert not waiter.done()
+        _databases(deployer)
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(exercise())
+
+
+def test_missing_accepted_subagent_does_not_stop_active_gateway(tmp_path, monkeypatch):
+    deployer = _deployer(tmp_path)
+    state, agent = _databases(deployer)
+    with sqlite3.connect(agent) as db:
+        db.execute("INSERT INTO session_nodes VALUES ('running', 'main', '{}')")
+    monkeypatch.setattr(module, "_SUBAGENT_POLL_S", 0.01)
+    monkeypatch.setattr(module, "_STATE_READ_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(module, "_SUBAGENT_SETTLE_S", 0.02)
+
+    async def exercise():
+        waiter = asyncio.create_task(deployer._wait_for_subagents({
+            "acceptedSessionSpawns": [{"runId": "run-1", "childSessionKey": "child"}],
+        }))
+        await asyncio.sleep(0.1)
+        assert not waiter.done()
+        with sqlite3.connect(state) as db:
+            db.execute("INSERT INTO subagent_runs VALUES (?, ?)", ("run-1", json.dumps({
+                "execution": {"status": "terminal"}, "delivery": {"status": "delivered"},
+            })))
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+        with sqlite3.connect(agent) as db:
+            db.execute("UPDATE session_nodes SET status = 'done'")
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(exercise())
+
+
+def test_missing_delivery_waits_past_old_deadline(tmp_path, monkeypatch):
+    deployer = _deployer(tmp_path)
+    _, agent = _databases(deployer)
+    with sqlite3.connect(agent) as db:
+        db.execute("INSERT INTO session_transcript_archives VALUES (?, 'deleted')", ("child",))
+        db.execute("INSERT INTO session_nodes VALUES ('done', 'main', '{}')")
+    clock = module.time.monotonic
+    start = clock()
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: (clock() - start) * 1000))
+    monkeypatch.setattr(module, "_SUBAGENT_POLL_S", 0.01)
+    monkeypatch.setattr(module, "_SUBAGENT_SETTLE_S", 0.02)
+
+    async def exercise():
+        waiter = asyncio.create_task(deployer._wait_for_subagents({
+            "acceptedSessionSpawns": [{"runId": "run-1", "childSessionKey": "child"}],
+        }))
+        await asyncio.sleep(0.1)
+        assert not waiter.done()
+        with sqlite3.connect(agent) as db:
+            db.execute("UPDATE session_nodes SET entry_json = ?", (json.dumps({"lastRunId": "announce:run-1"}),))
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(exercise())
+
+
+def test_empty_subagent_registry_still_waits_for_active_session(tmp_path, monkeypatch):
+    deployer = _deployer(tmp_path)
+    _, agent = _databases(deployer)
+    with sqlite3.connect(agent) as db:
+        db.execute("INSERT INTO session_nodes VALUES ('running', 'main', '{}')")
+    monkeypatch.setattr(module, "_SUBAGENT_POLL_S", 0.01)
+    monkeypatch.setattr(module, "_SUBAGENT_SETTLE_S", 0.02)
+
+    async def exercise():
+        waiter = asyncio.create_task(deployer._wait_for_subagents(None))
+        await asyncio.sleep(0.07)
+        assert not waiter.done()
+        with sqlite3.connect(agent) as db:
+            db.execute("UPDATE session_nodes SET status = 'done'")
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(exercise())
+
+
+def test_wait_stops_on_gateway_exit_or_external_timeout(tmp_path, monkeypatch):
+    deployer = _deployer(tmp_path)
+    _databases(deployer)
+    monkeypatch.setattr(module, "_SUBAGENT_POLL_S", 0.01)
+    envelope = {"acceptedSessionSpawns": [{"runId": "missing", "childSessionKey": "child"}]}
+
+    async def exercise():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(deployer._wait_for_subagents(envelope), 0.06)
+        with pytest.raises(RuntimeError, match="gateway exited"):
+            await deployer._wait_for_subagents(envelope, SimpleNamespace(returncode=1))
+
+    asyncio.run(exercise())
 
 
 def test_missing_accepted_child_is_recorded(tmp_path):
@@ -170,6 +265,22 @@ def test_unavailable_child_index_marks_cost_unknown(tmp_path):
         run_result=AgentRunResult(status="completed", exit_code=0), builder=builder,
     )
     assert builder.finalize(reward=None).final_metrics.total_cost_usd is None
+
+
+def test_main_continuation_usage_is_not_lost_without_children(tmp_path):
+    (tmp_path / "transcript.jsonl").write_text("\n".join(json.dumps(_message(n, c)) for n, c in [
+        (10, 0.5), (3, 0.2),
+    ]))
+    (tmp_path / "stdout.log").write_text(json.dumps({"payloads": [], "meta": {
+        "durationMs": 1, "agentMeta": {"usage": {"input": 10, "output": 1}},
+    }}))
+    builder = TrajectoryBuilder(agent_name="openclaw-cli", task_path="demo", variant_index=0)
+    OpenClawCliDeployer.parse_artifacts(
+        work_dir=tmp_path, config=OpenClawCliConfig(),
+        run_result=AgentRunResult(status="completed", exit_code=0), builder=builder,
+    )
+    metrics = builder.finalize(reward=None).final_metrics
+    assert (metrics.total_input_tokens, metrics.total_output_tokens) == (13, 2)
 
 
 def test_archived_child_uses_actual_model_from_transcript(tmp_path):

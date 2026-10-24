@@ -17,7 +17,7 @@ from ale_run.base_interface.agent_deployer import AgentRunResult
 from ale_run.base_interface.trajectory import StepMetrics, TrajectoryBuilder
 
 
-def _run_cli_fixture(tmp_path, monkeypatch, envelope, *, channel="stdout", exit_code=0, linger=False, prompt="finish the task"):
+def _run_cli_fixture(tmp_path, monkeypatch, envelope, *, channel="stdout", exit_code=0, linger=False, prompt="finish the task", wait_calls=None):
     import os
     import sys
 
@@ -31,8 +31,9 @@ def _run_cli_fixture(tmp_path, monkeypatch, envelope, *, channel="stdout", exit_
     monkeypatch.setattr(deployer, "_complete_workspace_bootstrap", lambda: None)
     async def fake_gateway(*_):
         return None, None
-    async def fake_wait(*_):
-        return None
+    async def fake_wait(*args):
+        if wait_calls is not None:
+            wait_calls.append(args[0])
     monkeypatch.setattr(deployer, "_start_gateway", fake_gateway)
     monkeypatch.setattr(deployer, "_wait_for_subagents", fake_wait)
     script = tmp_path / "fake_cli.py"
@@ -82,6 +83,15 @@ def test_launch_marks_aborted_result_failed(tmp_path, monkeypatch, channel):
     result = _run_cli_fixture(tmp_path, monkeypatch, _envelope(aborted=True), channel=channel)
     assert result.status == "failed"
     assert "agent aborted" in result.error
+
+
+def test_aborted_envelope_waits_for_accepted_subagent(tmp_path, monkeypatch):
+    envelope = _envelope(aborted=True)
+    envelope["acceptedSessionSpawns"] = [{"runId": "child"}]
+    waited = []
+    result = _run_cli_fixture(tmp_path, monkeypatch, envelope, wait_calls=waited)
+    assert result.status == "failed"
+    assert waited == [envelope]
 
 
 def test_launch_marks_empty_terminal_response_failed(tmp_path, monkeypatch):

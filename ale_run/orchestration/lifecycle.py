@@ -436,6 +436,18 @@ async def run_one_unit(
                 launch_confirmed=launch_confirmed,
             )
 
+            recover_artifacts = getattr(deployer_cls, "recover_stopped_artifacts", None)
+            recovery_manifest = None
+            recovery_error = None
+            if (launch_confirmed and isinstance(executor, SandboxExecutor)
+                    and recover_artifacts is not None):
+                try:
+                    recovery_manifest = await recover_artifacts(env.sandbox, executor.work_dir)
+                    writer.emit_event("agent_artifact_recovery_done", status=run_result.status)
+                except Exception as exc:
+                    recovery_error = exc
+                    writer.emit_event("agent_artifact_recovery_failed", error=str(exc))
+
             # ============================================================
             # Phase 2b — post-launch gather (origin_log) via executor.gather_dir
             # ============================================================
@@ -474,6 +486,10 @@ async def run_one_unit(
                     f"agent launch not confirmed; evaluation skipped ({detail}); "
                     f"original result: {run_result.error or run_result.status}"
                 )
+            if recovery_error is not None:
+                raise RuntimeError("agent artifact recovery failed") from recovery_error
+            if recovery_manifest is not None:
+                deployer_cls.validate_recovered_artifacts(host_artifacts_dir, recovery_manifest)
             # ============================================================
             # Phase 3 — gather env output, stage reference, evaluate
             # ============================================================
@@ -550,6 +566,11 @@ async def run_one_unit(
                         builder=builder,
                     )
                 except Exception as e:
+                    if recovery_manifest is not None:
+                        score = None
+                        eval_status = "failed"
+                        eval_error = err_dict(e)
+                        raise RuntimeError("recovered artifact parsing failed") from e
                     logger.warning("parse_artifacts failed for %s: %s", unit.slug, e)
                     builder.add_step(
                         source="system",
