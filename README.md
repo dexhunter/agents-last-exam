@@ -191,8 +191,7 @@ Set `tasks:` in your experiment to a compatible list:
 
 Difficulty tracks contain 45 near-term, 46 full-spectrum, and 36 last-exam
 tasks. These lists overlap. The Hugging Face data packages cover the 122 selected
-tasks. VM images retain data for 29 inactive tasks, which are not selected or
-counted as benchmark tasks.
+tasks.
 
 Environment profiles default to `output_path: null`, keeping bulk task output
 in the sandbox while collecting metadata, trajectories, evaluations, and

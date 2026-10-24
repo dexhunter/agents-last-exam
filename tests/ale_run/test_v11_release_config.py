@@ -136,19 +136,12 @@ def test_manifest_preserves_gates_and_has_no_private_paths(assets):
     assert assets["task_data"]["public_reference_format"] == "header-encrypted reference.7z"
 
 
-def test_inactive_payloads_are_not_selected(assets):
+def test_release_selection_excludes_retired_tasks(assets):
     selected = set(json.loads((ROOT / "tasks/published_tasks.json").read_text())["published"])
     data = assets["task_data"]
-    archive_inactive = set(data["archive_inactive_tasks"])
-    image_inactive = set(data["image_inactive_tasks"])
-    assert not archive_inactive
-    assert len(image_inactive) == 29
-    assert "education_info/homework_grading_numerical_pdes_instance_02" in image_inactive
-    assert selected.isdisjoint(image_inactive)
+    retired = set(assets["scope"]["retired_tasks"])
+    assert len(retired) == 30
+    assert selected.isdisjoint(retired)
     assert data["archive_task_coverage"] == len(selected) == 122
-    assert data["image_task_coverage"] == len(selected | image_inactive) == 151
-    assert data["image_data_manifest_task_coverage"] == 150
-    assert data["gcs_public"]["task_coverage"] == 150
-    assert data["gcs_public"]["inactive_tasks"] == 28
     assert data["gcs_public"]["source_logical_manifest_sha256"] == data["image_data_manifest_sha256"]
     assert data["manifest_sha256"] != data["image_data_manifest_sha256"]

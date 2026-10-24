@@ -52,8 +52,7 @@ of the environment configuration.
 
 Use `configs/environments/qemu.yaml` as the starting configuration, preserving
 each snapshot's `image_revision` pin from the [release manifest](../releases/v1.1/assets.json).
-Hugging Face data packages cover the 122 selected tasks. VM disks retain data for
-29 inactive tasks, which are not selected. See the
+Hugging Face data packages cover the 122 selected tasks. See the
 [release guide](releases/v1.1.md) or [original v1 setup](releases/v1.md).
 
 ## Check capacity and run
