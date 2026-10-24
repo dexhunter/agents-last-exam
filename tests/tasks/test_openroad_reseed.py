@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import shlex
 import subprocess
 from types import SimpleNamespace
@@ -20,17 +21,23 @@ def workspace(tmp_path):
 
 
 def test_effective_seed_overrides_configuration_in_recursive_make(workspace, monkeypatch):
-    native_run = subprocess.run
+    native_popen = subprocess.Popen
     observations = []
 
     def run_make(command, **kwargs):
         assert command[-3:-1] == ["bash", "-lc"]
-        result = native_run(command[-3:], cwd=workspace, capture_output=True, text=True)
-        observations.append(result.stdout.strip())
-        return result
+        process = native_popen(command[-3:], cwd=workspace, stdout=subprocess.PIPE, text=True)
+        stdout, _ = process.communicate(timeout=10)
+        observations.append(stdout.strip())
+        return process
+
+    def docker_control(command, **kwargs):
+        state = {"Running": False, "OOMKilled": False, "Error": ""}
+        return subprocess.CompletedProcess(command, 0, json.dumps(state), "")
 
     before = hashlib.sha256((workspace / "flow.mk").read_bytes()).hexdigest()
-    monkeypatch.setattr(verifier.subprocess, "run", run_make)
+    monkeypatch.setattr(verifier.subprocess, "Popen", run_make)
+    monkeypatch.setattr(verifier.subprocess, "run", docker_control)
     assert verifier._run_docker_flow_once(workspace) == 0
     assert verifier._run_docker_flow_once(workspace, routing_seed=20260417) == 0
     assert observations == ["make -s -f flow.mk\n42", "make -s -f flow.mk\n20260417"]
@@ -40,7 +47,7 @@ def test_effective_seed_overrides_configuration_in_recursive_make(workspace, mon
 @pytest.mark.parametrize("seed", [-1, 2**31, True, "1; exit 0"])
 def test_invalid_seed_never_launches_docker(workspace, monkeypatch, seed):
     launch = Mock()
-    monkeypatch.setattr(verifier.subprocess, "run", launch)
+    monkeypatch.setattr(verifier.subprocess, "Popen", launch)
     with pytest.raises(ValueError, match="routing_seed"):
         verifier._run_docker_flow_once(workspace, routing_seed=seed)
     launch.assert_not_called()
@@ -51,9 +58,10 @@ def test_native_failure_retry_preserves_selected_seed(workspace, monkeypatch):
     monkeypatch.setattr(verifier, "_run_docker_flow_once", run)
     monkeypatch.setattr(verifier, "_cts_illegal_instruction_detected", lambda directory: True)
     assert verifier.run_docker_flow(workspace, routing_seed=123) == 0
-    assert run.call_args_list[0].kwargs == {"env": None, "routing_seed": 123}
+    deadline = run.call_args_list[0].kwargs["deadline"]
+    assert run.call_args_list[0].kwargs == {"env": None, "routing_seed": 123, "deadline": deadline}
     assert run.call_args_list[1].kwargs == {
-        "env": {"SKIP_CTS_REPAIR_TIMING": "1"}, "routing_seed": 123
+        "env": {"SKIP_CTS_REPAIR_TIMING": "1"}, "routing_seed": 123, "deadline": deadline
     }
 
 
@@ -74,7 +82,7 @@ def test_reseed_uses_different_seed_and_retains_physical_gates(tmp_path, monkeyp
         report.add(verifier.GateResult(gate_id, gate_id, weight, weight if passes else 0, passes))
     monkeypatch.setattr(verifier, "score_submission", lambda *arguments: report)
     result = verifier.gate_g9_reseed(starter, configuration, journal, tmp_path / "scratch", {})
-    assert run.call_args.kwargs == {"routing_seed": expected}
+    assert run.call_args.kwargs == {"routing_seed": expected, "deadline": None}
     assert result.score == (10 if passes else 0)
     assert result.passed == passes
     assert configuration.read_text() == f"export OR_SEED = {original}\n"

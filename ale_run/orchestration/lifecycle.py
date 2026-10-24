@@ -301,6 +301,7 @@ async def run_one_unit(
                 os_type=env.sandbox.os,
                 session_rebuilder=env.reset_session,
             )
+            eval_timeout_s = task_driver.evaluation_timeout_s or _EVAL_TIMEOUT_S
             await task_driver.setup()
 
             # ============================================================
@@ -526,7 +527,7 @@ async def run_one_unit(
             exec_ended = eval_start
             try:
                 eval_out = await asyncio.wait_for(
-                    task_driver.evaluate(), timeout=_EVAL_TIMEOUT_S,
+                    task_driver.evaluate(), timeout=eval_timeout_s,
                 )
                 eval_duration_s = round(time.monotonic() - eval_start, 4)
                 if eval_out is None or eval_out.get("error"):
@@ -547,9 +548,9 @@ async def run_one_unit(
                 eval_status = "timeout"
                 eval_error = {
                     "type": "TimeoutError",
-                    "message": f"evaluate() exceeded {_EVAL_TIMEOUT_S}s wall-clock",
+                    "message": f"evaluate() exceeded {eval_timeout_s:g}s wall-clock",
                 }
-                logger.error("evaluate timed out after %ds for %s", _EVAL_TIMEOUT_S, unit.slug)
+                logger.error("evaluate timed out after %gs for %s", eval_timeout_s, unit.slug)
             except Exception as e:
                 eval_duration_s = round(time.monotonic() - eval_start, 4)
                 eval_status = "failed"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any, Awaitable, Callable, Dict
 
 from cua_bench.computers.remote import RemoteDesktopSession
@@ -322,6 +323,23 @@ class TaskDriver:
     @property
     def task_metadata(self) -> dict:
         return self._task_info["metadata"]
+
+    @property
+    def evaluation_timeout_s(self) -> float | None:
+        """Optional task-declared evaluator wall budget, in seconds."""
+        value = self.task_metadata.get("evaluation_timeout_s")
+        if value is None:
+            return None
+        message = "evaluation_timeout_s must be a finite positive number"
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(message)
+        try:
+            timeout = float(value)
+        except OverflowError as exc:
+            raise ValueError(message) from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(message)
+        return timeout
 
     @property
     def task_info(self) -> dict:

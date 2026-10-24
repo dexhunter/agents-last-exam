@@ -1,10 +1,12 @@
+import asyncio
 import copy
 import hashlib
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import requests
@@ -202,6 +204,198 @@ def test_engine_transport_error_is_evaluator_error():
     api.session.request = Mock(side_effect=requests.ConnectionError("engine down"))
     with pytest.raises(runtime.EvaluationError, match="transport unavailable"):
         api.request("POST", "runtime/process-instances", candidate=True, json={})
+
+
+def test_ready_engine_does_not_run_compose(monkeypatch):
+    api = runtime.Flowable("http://unused/")
+    api.request = Mock(return_value={"version": "6.5.0"})
+    startup = Mock()
+    monkeypatch.setattr(runtime.subprocess, "run", startup)
+    assert api.ensure_ready(Path("/staged/docker-compose.yml")) == {"version": "6.5.0"}
+    startup.assert_not_called()
+
+
+def test_stopped_engine_is_started_and_polled_until_api_ready(monkeypatch):
+    api = runtime.Flowable("http://unused/")
+    api.request = Mock(
+        side_effect=[
+            runtime.EvaluationError("connection refused"),
+            runtime.FlowableResponseError("starting", 503, {}),
+            {"version": "6.5.0"},
+        ]
+    )
+    startup = Mock(return_value=subprocess.CompletedProcess([], 0, "started", ""))
+    monkeypatch.setattr(runtime.subprocess, "run", startup)
+    monkeypatch.setattr(runtime.time, "sleep", lambda delay: None)
+    assert api.ensure_ready(Path("/staged/docker-compose.yml")) == {"version": "6.5.0"}
+    assert startup.call_args.args[0] == [
+        "docker", "compose", "-f", "/staged/docker-compose.yml", "up", "-d"
+    ]
+    assert startup.call_args.kwargs["timeout"] <= 180
+    assert api.request.call_count == 3
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "timeout", "missing_docker"])
+def test_startup_failures_remain_evaluator_errors(monkeypatch, failure):
+    api = runtime.Flowable("http://unused/")
+    api.request = Mock(side_effect=runtime.EvaluationError("connection refused"))
+    startup = Mock(return_value=subprocess.CompletedProcess([], 1, "", "daemon unavailable"))
+    if failure == "timeout":
+        startup.side_effect = subprocess.TimeoutExpired("docker compose", 180)
+    elif failure == "missing_docker":
+        startup.side_effect = FileNotFoundError("docker")
+    monkeypatch.setattr(runtime.subprocess, "run", startup)
+    with pytest.raises(runtime.EvaluationError, match="Flowable startup failed"):
+        api.ensure_ready(Path("/staged/docker-compose.yml"))
+
+
+def test_compose_success_without_ready_api_is_evaluator_error(monkeypatch):
+    api = runtime.Flowable("http://unused/")
+    api.request = Mock(side_effect=runtime.EvaluationError("connection refused"))
+    monkeypatch.setattr(
+        runtime.subprocess, "run", Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+    )
+    monkeypatch.setattr(runtime.time, "monotonic", Mock(side_effect=[0, 0, 0, 0, 1, 1]))
+    monkeypatch.setattr(runtime.time, "sleep", lambda delay: None)
+    with pytest.raises(runtime.EvaluationError, match="did not become ready"):
+        api.ensure_ready(Path("/staged/docker-compose.yml"), timeout_s=0.5)
+
+
+@pytest.mark.parametrize("phase", ["startup", "deployment_transport"])
+def test_suite_infrastructure_failure_propagates_without_a_score(monkeypatch, manifest, phase):
+    api = Mock()
+    if phase == "startup":
+        api.ensure_ready.side_effect = runtime.EvaluationError("startup failed")
+    else:
+        api.deploy.side_effect = runtime.EvaluationError("connection lost")
+    monkeypatch.setattr(runtime, "Flowable", Mock(return_value=api))
+    with pytest.raises(runtime.EvaluationError):
+        runtime.run_suite(
+            b'<process id="zMBCategoryGovernance_modified_L3"/>', manifest,
+            api_url="http://unused/", compose_file=Path("/staged/docker-compose.yml")
+        )
+    api.ensure_ready.assert_called_once_with(Path("/staged/docker-compose.yml"))
+    if phase == "startup":
+        api.deploy.assert_not_called()
+
+
+def test_fixture_completion_is_independent_of_candidate_and_covers_capacity_both_ways(manifest):
+    original = copy.deepcopy(manifest)
+    scenarios = runtime.complete_original_fixtures(runtime.validate_manifest(manifest))
+    assert manifest == original
+    assert len(scenarios) == 60
+    assert [row["id"] for row in scenarios] == [row["id"] for row in original["scenarios"]]
+    outcomes = {
+        row["task_outputs"]["logistics_capacity_confirmation"]["out_capacity_ok"]
+        for row in scenarios if not row.get("is_structural_check")
+    }
+    assert outcomes == {True, False}
+    assert all(row["task_outputs"] == {} for row in original["scenarios"][:55])
+    assert scenarios[-5:] == original["scenarios"][-5:]
+
+
+def test_explicit_fixture_outputs_override_defaults_including_aliases_and_per_visit_lists():
+    scenarios = [{
+        "task_outputs": {
+            "logistics_capacity_confirmation": {"capacity_ok": False},
+            "team_executes_plan": [{"out_execution_report": "delayed"}, {}],
+            "owner_coordinates_merchants": {"out_exception_detected": True},
+        },
+    }]
+    original = copy.deepcopy(scenarios)
+    outputs = runtime.complete_original_fixtures(scenarios)[0]["task_outputs"]
+    assert outputs["logistics_capacity_confirmation"] == {"capacity_ok": False}
+    assert outputs["team_executes_plan"] == [
+        {"out_execution_report": "delayed"}, {"out_execution_report": "completed"}
+    ]
+    assert outputs["owner_coordinates_merchants"]["out_exception_detected"] is True
+    assert scenarios == original
+
+
+@pytest.mark.parametrize("condition", ["out_capacity_ok == true", "out_capacity_ok == false"])
+def test_capacity_fixture_does_not_follow_candidate_condition(manifest, condition):
+    xml = f"""<process id="zMBCategoryGovernance_modified_L3" xmlns:flowable="http://flowable.org/bpmn">
+      <userTask id="logistics_capacity_confirmation"><extensionElements>
+        <flowable:formProperty id="answer" variable="out_capacity_ok" type="boolean" required="true"/>
+      </extensionElements></userTask>
+      <exclusiveGateway id="notice"/><endEvent id="main_end"/>
+      <sequenceFlow id="next" sourceRef="logistics_capacity_confirmation" targetRef="notice"/>
+      <sequenceFlow id="done" sourceRef="notice" targetRef="main_end"><conditionExpression>${{{condition}}}</conditionExpression></sequenceFlow>
+    </process>""".encode()
+    binding = runtime.Bindings(xml)
+    scenarios = runtime.complete_original_fixtures(runtime.validate_manifest(manifest))
+    for scenario, expected in zip(scenarios, [True, False]):
+        values = binding.task_values("logistics_capacity_confirmation", 1, scenario)
+        assert values == {"out_capacity_ok": expected, "answer": expected}
+        assert binding.unbound_routing_outputs("logistics_capacity_confirmation", values) == []
+    assert binding.task_values("logistics_capacity_confirmation", 1, {}) == {}
+
+
+@pytest.mark.parametrize("capacity_ok", [True, False])
+@pytest.mark.parametrize("violation", ["main_decision_routes_to_logistics", "logistics_approves_main"])
+def test_capacity_feedback_preserves_logistics_business_role_assertions(capacity_ok, violation):
+    source, target = (
+        ("main_decision", "logistics_capacity_confirmation")
+        if violation == "main_decision_routes_to_logistics"
+        else ("logistics_capacity_confirmation", "main_decision")
+    )
+    xml = f"""<process id="zMBCategoryGovernance_modified_L3" xmlns:flowable="http://flowable.org/bpmn">
+      <laneSet><lane id="logistics_lane"><flowNodeRef>logistics_capacity_confirmation</flowNodeRef></lane></laneSet>
+      <userTask id="logistics_capacity_confirmation"><extensionElements>
+        <flowable:formProperty id="out_capacity_ok" type="boolean" required="true"/>
+      </extensionElements></userTask>
+      <exclusiveGateway id="main_decision"/>
+      <sequenceFlow id="invalid_role_flow" sourceRef="{source}" targetRef="{target}"/>
+    </process>""".encode()
+    binding = runtime.Bindings(xml)
+    scenario = runtime.complete_original_fixtures([{
+        "task_outputs": {"logistics_capacity_confirmation": {"out_capacity_ok": capacity_ok}}
+    }])[0]
+    assert binding.task_values("logistics_capacity_confirmation", 1, scenario) == {
+        "out_capacity_ok": capacity_ok
+    }
+    if violation == "main_decision_routes_to_logistics":
+        checks = runtime.topology.check_anti_gaming(binding.graph, binding.discovered)
+        assert not checks["d05_logistics_not_modified"]
+    else:
+        assert not runtime.topology._check_logistics_outgoing_safe(binding.graph)
+
+
+def test_all_required_original_human_outputs_have_explicit_fixtures(manifest):
+    original = Path(__file__).resolve().parents[2] / (
+        "task-data-hf/extracted/business_finance/bpmn_category_governance_restructuring_l3/"
+        "base/input/starter_project/original_process.bpmn20.xml"
+    )
+    if not original.is_file():
+        pytest.skip("Staged original task data not available")
+    binding = runtime.Bindings(original.read_bytes())
+    scenario = runtime.complete_original_fixtures(runtime.validate_manifest(manifest))[0]
+    required = set()
+    for identity, properties in binding.properties.items():
+        values = binding.task_values(identity, 1, scenario)
+        for prop in properties:
+            if prop.get("required") == "true" and prop.get("writable", "true") == "true":
+                assert prop.get("variable", prop["id"]) in values, (identity, prop)
+                required.add(prop["id"])
+    assert "out_capacity_ok" in required
+    assert len(required) == 8
+
+
+def test_remote_startup_error_propagates_without_candidate_zero(manifest):
+    session = Mock()
+    session.run_command = AsyncMock(return_value={})
+    session.write_bytes = AsyncMock()
+    session.file_exists = AsyncMock(side_effect=[False, True])
+    session.read_bytes = AsyncMock(return_value=json.dumps({
+        "evaluation_error": "Flowable startup failed", "error_type": "EvaluationError"
+    }).encode())
+    with pytest.raises(runtime.EvaluationError, match="startup failed"):
+        asyncio.run(runtime.evaluate_remote(
+            session, b"<process/>", manifest, Mock(), compose_file="/staged/docker-compose.yml"
+        ))
+    launch = session.run_command.call_args.args[0]
+    assert "--compose-file" in launch
+    assert "/staged/docker-compose.yml" in launch
 
 
 def test_engine_http500_is_not_evidence_of_candidate_fault():
