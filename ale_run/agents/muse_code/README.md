@@ -61,7 +61,8 @@ Likewise, Muse's native telemetry is not a Codex/Claude OTLP stream.
 - `transcript.jsonl` and `stderr.log`: incrementally collected CLI output.
 - `native_events.jsonl`: incrementally mirrored, credential-redacted native session records, including child sessions.
 - `muse-settings.json`: the exact native MCP configuration.
-- `native_data_path.json` and `muse-data/<launch>/`: select and retain the native logs for this launch, excluding prior sessions and application profiles.
+- `native_data_path.json` and `muse-data/<launch>/native.zip`: select and retain the native logs and tool artifacts for this launch, excluding prior sessions and application profiles. The archive avoids Windows path limits; parsing reads session records without extracting it.
+- `artifact_collection_error.json`: records a native snapshot failure without replacing the CLI's completion, failure, or cancellation outcome. The incremental native event mirror remains available.
 - `telemetry.jsonl`: normalized native events, including provider diagnostics and compaction events.
 - `telemetry_summary.json`: API completion usage, provider attempts/response IDs when reported, tool lifecycle timings/errors, terminal state, and event counts.
 - The standard ALE `trajectory.json`: assistant messages, reasoning text/summaries when exposed (encrypted reasoning remains in native logs), tool calls/results, screenshots, token/cache accounting and child trajectories.
