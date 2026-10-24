@@ -112,9 +112,8 @@ ps -eo pid,comm,args | rg '[q]emu-system'</code></pre>
       shipped profile; see <a href="/pages/configure.html#v1-1">release pins</a>.
     </p>
     <p>
-      Published payloads are unchanged: standalone data packages 150 tasks
-      (28 inactive), and VM disks package 151 (29 inactive, including PDE).
-      Inactive payloads are not selected or counted among the 122 active tasks.
+      Hugging Face data packages cover the 122 selected tasks. VM disks retain
+      data for 29 inactive tasks, which are not selected or counted.
       To run legacy disks with v1 code and fresh logs, use the
       <a href="https://github.com/rdi-berkeley/agents-last-exam/blob/main/docs/releases/v1.md">original v1 guide</a>.
     </p>

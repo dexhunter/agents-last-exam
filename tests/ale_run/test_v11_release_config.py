@@ -37,6 +37,19 @@ def test_selected_task_lists_match_release(assets):
     assert assets["selected_task_lists"]["selected_tasks/docker_support.txt"]["count"] == 78
 
 
+def test_v11_modified_tasks_are_in_full_selection(assets):
+    def read_tasks(name):
+        return {
+            line.strip()
+            for line in (ROOT / "selected_tasks" / name).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+    modified = read_tasks("v1.1_modified.txt")
+    assert len(modified) == assets["scope"]["updated_tasks"] == 57
+    assert modified <= read_tasks("full.txt")
+
+
 @pytest.mark.parametrize("path", ["README.md", "docs/releases/v1.1.md", "docs/ale-docs-site/pages/configure.html"])
 def test_documented_task_list_counts_match_release(assets, path):
     text = (ROOT / path).read_text()
@@ -128,10 +141,14 @@ def test_inactive_payloads_are_not_selected(assets):
     data = assets["task_data"]
     archive_inactive = set(data["archive_inactive_tasks"])
     image_inactive = set(data["image_inactive_tasks"])
-    assert len(archive_inactive) == 28
-    assert image_inactive == archive_inactive | {
-        "education_info/homework_grading_numerical_pdes_instance_02"
-    }
+    assert not archive_inactive
+    assert len(image_inactive) == 29
+    assert "education_info/homework_grading_numerical_pdes_instance_02" in image_inactive
     assert selected.isdisjoint(image_inactive)
-    assert data["archive_task_coverage"] == len(selected | archive_inactive) == 150
+    assert data["archive_task_coverage"] == len(selected) == 122
     assert data["image_task_coverage"] == len(selected | image_inactive) == 151
+    assert data["image_data_manifest_task_coverage"] == 150
+    assert data["gcs_public"]["task_coverage"] == 150
+    assert data["gcs_public"]["inactive_tasks"] == 28
+    assert data["gcs_public"]["source_logical_manifest_sha256"] == data["image_data_manifest_sha256"]
+    assert data["manifest_sha256"] != data["image_data_manifest_sha256"]

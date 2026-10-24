@@ -51,7 +51,7 @@ snapshots:
     image: ale-ubuntu22-v1-1
     qemu:
       disk_source: hf://agents-last-exam/ale-images-qcow2/ale-ubuntu22-v1.1.qcow2
-      image_revision: 40ba46b348a684b7d1b34d18e308aed54737f41a
+      image_revision: 21290f6d47ae765def3c799281e8cf6e4bc22a22
       # GCS alternative: gs://ale-data-public/images/ale-ubuntu22-v1.1.qcow2
       root: ~/.cache/ale/qemu
       runner_image: agentslastexam/ale-qemu:0.2.0
@@ -64,7 +64,7 @@ snapshots:
     image: ale-win10-v1-1
     qemu:
       disk_source: hf://agents-last-exam/ale-images-qcow2/ale-win10-v1.1.qcow2
-      image_revision: 40ba46b348a684b7d1b34d18e308aed54737f41a
+      image_revision: 21290f6d47ae765def3c799281e8cf6e4bc22a22
       # GCS alternative: gs://ale-data-public/images/ale-win10-v1.1.qcow2
       root: ~/.cache/ale/qemu
       runner_image: agentslastexam/ale-qemu:0.2.0
