@@ -217,19 +217,37 @@ def validate_contract(contract: dict) -> None:
 def forbidden(path: str, contract: dict) -> bool:
     path = canonical(path)
     parts = path.strip("/").split("/")
-    parents = [path, *[str(item) for item in Path(path).parents]]
+    parents: list[str] = []
+
+    def lineage() -> list[str]:
+        if not parents:
+            # Same ancestors as Path(path).parents: drop empty and "." components.
+            names = [part for part in parts if part not in ("", ".")]
+            parents.append(path)
+            parents.extend("/" + "/".join(names[:end]) for end in range(len(names) - 1, -1, -1))
+        return parents
+
     if path.startswith("/home/") and len(parts) > 1 and parts[1] != "user":
         return True
-    if any(COMPONENT_PATTERN.fullmatch(part) for part in parts):
+    if any(map(COMPONENT_PATTERN.fullmatch, parts)):
         return True
     if any(beneath(path, prefix) for prefix in contract.get("exclude_paths", [])):
         return True
+
+    def wildcard(pattern: str) -> bool:
+        # Without "." or empty components every ancestor is a prefix of path,
+        # so a match must start with the literal head before the first "*".
+        clean = "/." not in path and "//" not in path
+        if clean and not path.startswith(pattern.split("*", 1)[0]):
+            return False
+        return any(fnmatch.fnmatchcase(parent, pattern) for parent in lineage())
+
+    literal = path.startswith(EXCLUDED)
     for pattern in EXCLUDED:
-        matches = (
-            beneath(path, pattern)
-            if "*" not in pattern
-            else any(fnmatch.fnmatchcase(parent, pattern) for parent in parents)
-        )
+        if "*" in pattern:
+            matches = wildcard(pattern)
+        else:
+            matches = literal and beneath(path, pattern)
         if matches:
             if pattern == "/media/user/data" and any(
                 beneath(path, keep) or beneath(keep, path)
@@ -240,13 +258,13 @@ def forbidden(path: str, contract: dict) -> bool:
     for home in ("/home/user", "/root"):
         if not beneath(path, home):
             continue
+        rel = path[len(home) + 1 :]
+        literal = rel.startswith(HOME_STATE)
         for state in HOME_STATE:
-            prefix = home + "/" + state
-            matches = (
-                beneath(path, prefix)
-                if "*" not in state
-                else any(fnmatch.fnmatchcase(parent, prefix) for parent in parents)
-            )
+            if "*" in state:
+                matches = wildcard(home + "/" + state)
+            else:
+                matches = literal and beneath(rel, state)
             if matches:
                 if state == ".cache" and any(
                     beneath(path, keep) or beneath(keep, path)
